@@ -987,8 +987,10 @@ Current implementation progress:
 
 - Phase 1A - Extract Data: Done.
 - Phase 1B - Extract Core Match State: Done.
-- Phase 1C - Extract Gameplay Systems: In progress.
-- Phase 1D-1F: Not started.
+- Phase 1C - Extract Gameplay Systems: Done (AI, camera, and match rules extracted; goal scoring is debounced).
+- Phase 1D - Extract Rendering Layer: Done for scene, pitch/stadium, player/ball visuals, HUD, and minimap boundaries.
+- Phase 1E - Extract Input And Actions: Done for shared keyboard/touch action contracts and input adapters.
+- Phase 1F - Test, Debug, And Replay Foundation: Done (Vitest, deterministic random, fixed timestep, replay and state hash foundations).
 
 #### Phase 1A - Extract Data
 
@@ -1074,7 +1076,7 @@ Systems:
 Tasks:
 
 - Move player movement into `MovementSystem`. Done.
-- Move ball attach, pass, shot, friction, and bounce into `BallSystem`. Partial: ball attach movement, friction, bounce, wall bounce, and goal callback are extracted; pass and shot actions remain in `main.ts`.
+- Move ball attach, pass, shot, friction, and bounce into `BallSystem`. Ball movement, friction, bounce, wall bounce, goal callback, and pass/shot impulses are extracted; ownership glue remains coordinated by `main.ts`.
 - Move ball owner detection into `PossessionSystem`. Done.
 - Move player-player separation into `CollisionSystem`. Done.
 - Move AI decisions into `AISystem`.
@@ -1085,8 +1087,9 @@ Implementation progress:
 
 - Created `src/core/systems/types.ts` for shared simulation-facing player, ball, and field-boundary contracts.
 - Created `MovementSystem`, `BallSystem`, `PossessionSystem`, and `CollisionSystem`.
-- `src/main.ts` now coordinates those systems through thin wrapper functions while keeping HUD, input, Three.js setup, pass/shoot/tackle actions, AI, camera, and match-end flow local for the next extraction pass.
-- Verified with `npm.cmd run build`.
+- Added `AISystem`, `CameraSystem`, and `MatchRuleSystem`; `main.ts` now uses the rule system for debounced scoring and coordinates fixed simulation steps.
+- Goal reset timers are cancelled on restart and repeated goal callbacks cannot increment the score.
+- Verified with `npm run build` and `npm test`.
 
 Deliverable:
 
@@ -1111,10 +1114,7 @@ Separate visual rendering from match logic.
 Modules:
 
 - `SceneFactory`
-- `PitchRenderer`
-- `StadiumRenderer`
-- `PlayerRenderer`
-- `BallRenderer`
+- `WorldFactory` (pitch, stadium, player, and ball visual factories)
 - `HudController`
 - `MinimapController`
 
@@ -1139,6 +1139,10 @@ Acceptance:
 - Scoreboard still updates.
 - Minimap still updates.
 - Mobile and desktop HUD still display correctly.
+
+Implementation note:
+
+- `SceneFactory` owns renderer/scene/camera creation and `WorldFactory` owns pitch, stadium, player, and ball visual construction. `HudController` and `MinimapController` consume simulation state without owning match rules.
 
 #### Phase 1E - Extract Input And Actions
 
@@ -1182,6 +1186,10 @@ Acceptance:
 - `C` switch camera works.
 - Mobile joystick and buttons still work.
 
+Implementation note:
+
+- Added `src/core/input/types.ts`, `KeyboardInput.ts`, `TouchInput.ts`, and `MatchController.ts`. Both adapters expose the same `InputState` and `GameAction` contracts, and `main.ts` has one input source with no legacy key/touch listeners.
+
 #### Phase 1F - Test, Debug, And Replay Foundation
 
 Goal:
@@ -1223,6 +1231,12 @@ Acceptance:
 - `npm.cmd test` passes.
 - No browser console errors.
 - Debug state can report score, timer, possession, camera mode, and player count.
+
+Implementation note:
+
+- Added `src/core/random.ts`, `src/core/simulation/FixedTimestep.ts`, `src/core/replay/ReplayRecorder.ts`, and `src/core/debug/stateHash.ts`.
+- Added thirteen unit tests covering roster loading, match clock, score, camera, goal detection/debounce, possession, fixed timestep, seeded random determinism, action routing, short-tap delivery, key-repeat suppression, and stale-score regression.
+- Dependency versions are aligned to Three.js `0.164.1` and matching `@types/three` `0.164.1`; Vitest is now the test runner.
 
 Deliverable:
 
@@ -1271,6 +1285,16 @@ Goal:
 Make the match fun before adding more screens.
 
 Phase 2 is about feel. The game already works, but this phase makes the match satisfying enough that players want another game.
+
+Implementation status (2026-09-03):
+
+- Phase 2A movement tuning is integrated through the shared `MovementConfig`/`MovementResult` contract.
+- Phase 2B dribbling and first-touch systems are integrated into the owner/receive paths; shielding remains an explicit placeholder.
+- Phase 2C passing and Phase 2D shooting are integrated into keyboard, touch, and AI actions with deterministic match RNG and feedback telemetry.
+- Phase 2E goalkeeper movement/save/distribution and camera smoothing/goal emphasis are integrated through their system contracts.
+- Automated evidence is green: 51 Vitest tests and the production build pass.
+- Desktop and mobile browser QA pass with 22 players, a visible ball/minimap, working pass and finesse-shot telemetry, no horizontal mobile overflow, and no console errors.
+- A full four-minute browser match reached the full-time result screen cleanly. The requested 30-60 second demo clip and a live close-range keeper/save capture remain release evidence to record.
 
 #### Phase 2A - Movement Feel
 
@@ -1371,6 +1395,24 @@ Demo Evidence:
 
 - 30-60 second gameplay clip showing movement, pass, shot, and save.
 - Tuning notes for movement, passing, shooting, and goalkeeper.
+
+Tuning Notes (before -> after):
+
+| Area | Before Phase 2 | Phase 2 tuning/integration | Evidence/remaining check |
+| --- | --- | --- | --- |
+| Movement | Direct lerp and immediate braking made turns/stop feel light. | Shared config adds acceleration, deceleration, turn-rate limits, sprint multiplier, and stamina cost; the active-player result is exposed in debug state. | `MovementSystem` tests and the four-minute runtime stability check pass; final subjective feel capture remains. |
+| Dribbling/first touch | Owner branch snapped the ball to one fixed foot point and receivers attached without a touch outcome. | Dribbling owns a stat-scaled attachment point and reports frame-rate-independent loose-touch risk; first touch runs before possession attach and can retain/release pace. | Dribbling/first-touch tests pass at 30/60/120 Hz; a 12-second browser cadence check showed no heavy-touch feed spam. |
+| Passing | Fixed strength and ad-hoc nearest-target scoring. | Assisted target ranking, distance-based ground speed, lead, interception corridor/window, and pass feedback are used by user and AI actions. | Tests pass; browser QA confirmed a controlled pass to Rodrygo with risk/feedback telemetry. |
+| Shooting | Random target/power in the orchestrator with no pressure quality contract. | Power/finesse plans select goal targets, derive stat/pressure accuracy, add spin/curl placeholder, keeper quality input, and shot feedback. | Shooting/keeper tests pass; manual save/goal check remains. |
+| Goalkeeper/camera | Goalkeeper movement and camera framing were handled by generic branches. | Keeper positioning, save/parry/claim resolution, distribution choice, camera smoothing, and goal emphasis are wired through dedicated systems. | System tests and broadcast/follow camera browser QA pass; a live close-range save/goal clip remains. |
+
+Phase 2 gate status:
+
+- Automated gate: passed (`npm.cmd test`, `npm.cmd run build`).
+- Runtime gate: passed at desktop and 390x844 mobile; the four-minute match reached full time at 0-0 with no console errors.
+- Desktop/mobile controls remain available; `K` is power shot and `Shift+K` (or holding Sprint while tapping Shoot) requests finesse.
+- Responsive follow-up: at mobile widths the camera/possession/action chips now occupy a reserved left column separate from the minimap; chip text ellipsizes within that safe area and the game root clips horizontal overflow.
+- Phase 2 implementation and stability gates are accepted. Demo-video evidence and a live close-range keeper/save example remain presentation follow-ups, not implementation blockers.
 
 Out of Scope:
 

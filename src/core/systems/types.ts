@@ -31,6 +31,8 @@ export type SimPlayer = {
 export type SimBall = {
   position: THREE.Vector3;
   velocity: THREE.Vector3;
+  /** Optional spin state; older callers can continue using position/velocity only. */
+  spin?: THREE.Vector3;
   mesh: THREE.Mesh;
 };
 

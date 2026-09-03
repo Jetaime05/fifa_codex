@@ -37,8 +37,10 @@ body {
 .game-root {
   position: fixed;
   inset: 0;
-  width: 100vw;
+  width: 100%;
+  max-width: 100%;
   height: 100vh;
+  overflow: hidden;
   background: #07100d;
 }
 
@@ -428,11 +430,24 @@ body {
   .top-left {
     top: 62px;
     left: 10px;
+    right: 168px;
+    width: auto;
+    max-width: none;
+  }
+
+  .chip-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
   }
 
   .chip {
+    min-width: 0;
+    overflow: hidden;
     padding: 6px 7px;
     font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .feed {
@@ -472,6 +487,10 @@ body {
 
   .minimap {
     width: 126px;
+  }
+
+  .top-left {
+    right: 158px;
   }
 
   .player-panel {

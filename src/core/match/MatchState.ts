@@ -69,7 +69,7 @@ export function startMatchIfNeeded(state: MatchState) {
 }
 
 export function advanceMatchClock(state: MatchState, deltaSeconds: number) {
-  if (deltaSeconds <= 0 || state.status === "paused" || state.status === "fullTime") {
+  if (deltaSeconds <= 0 || state.status === "paused" || state.status === "goal" || state.status === "fullTime") {
     return state.elapsed;
   }
 

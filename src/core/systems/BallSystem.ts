@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { TeamId } from "../../data/types";
 import type { FieldBounds, SimBall, SimPlayer } from "./types";
+import { isGoalCrossed } from "./MatchRuleSystem";
 
 type BallPhysicsInput = {
   ball: SimBall;
@@ -11,6 +12,13 @@ type BallPhysicsInput = {
   goalWidth: number;
   playerForward: (player: SimPlayer) => THREE.Vector3;
   onGoal: (team: TeamId) => void;
+};
+
+export type BallKickOptions = {
+  /** Spin around the local x/y/z axes. y is the horizontal curl placeholder. */
+  spin?: THREE.Vector3;
+  /** Convenience alias for horizontal curl when a full spin vector is not needed. */
+  curve?: number;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -31,8 +39,25 @@ export function updateBallPhysics({
     const foot = ballOwner.position.clone().add(forward.multiplyScalar(1.05));
     foot.y = ballRadius;
     ball.position.lerp(foot, clamp(dt * 18, 0, 1));
+    if (ball.spin) ball.spin.multiplyScalar(Math.pow(0.08, dt));
     ball.mesh.position.copy(ball.position);
     return;
+  }
+
+  // Phase 2 placeholder spin: y bends the horizontal velocity and x adds a
+  // small backspin/lift bias. Keeping this in BallSystem means passing and
+  // shooting can share the same trajectory contract without owning physics.
+  if (ball.spin && ball.spin.lengthSq() > 0.000001) {
+    const horizontalSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+    if (horizontalSpeed > 0.05) {
+      const curve = ball.spin.y * 0.035 * horizontalSpeed * dt;
+      const perpendicularX = -ball.velocity.z / horizontalSpeed;
+      const perpendicularZ = ball.velocity.x / horizontalSpeed;
+      ball.velocity.x += perpendicularX * curve;
+      ball.velocity.z += perpendicularZ * curve;
+    }
+    ball.velocity.y += ball.spin.x * 1.8 * dt;
+    ball.spin.multiplyScalar(Math.pow(0.24, dt));
   }
 
   ball.velocity.y -= 12.5 * dt;
@@ -57,13 +82,12 @@ export function updateBallPhysics({
     ball.velocity.x *= -0.52;
   }
 
-  const inGoalMouth = Math.abs(ball.position.x) < goalWidth / 2 && ball.position.y < 4.8;
   if (Math.abs(ball.position.z) > bounds.halfLength - ballRadius) {
-    if (inGoalMouth && Math.abs(ball.position.z) > bounds.halfLength + 0.8) {
+    if (isGoalCrossed(ball.position.z, ball.position.x, ball.position.y, bounds.halfLength, goalWidth)) {
       onGoal(ball.position.z > 0 ? "home" : "away");
       return;
     }
-    if (Math.abs(ball.position.z) > bounds.halfLength - ballRadius && !inGoalMouth) {
+    if (Math.abs(ball.position.z) > bounds.halfLength - ballRadius && !isGoalCrossed(ball.position.z, ball.position.x, ball.position.y, bounds.halfLength, goalWidth)) {
       ball.position.z = Math.sign(ball.position.z) * (bounds.halfLength - ballRadius);
       ball.velocity.z *= -0.42;
     }
@@ -72,4 +96,33 @@ export function updateBallPhysics({
   ball.mesh.position.copy(ball.position);
   ball.mesh.rotation.x += ball.velocity.z * dt * 0.7;
   ball.mesh.rotation.z -= ball.velocity.x * dt * 0.7;
+}
+
+export function kickBall(ball: SimBall, target: THREE.Vector3, strength: number, lift = 0, options: BallKickOptions = {}) {
+  const direction = target.clone().sub(ball.position);
+  if (direction.lengthSq() < 0.000001) {
+    direction.set(0, 0, 1);
+  } else {
+    direction.normalize();
+  }
+  ball.velocity.copy(direction.multiplyScalar(strength));
+  ball.velocity.y += lift;
+  if (ball.spin) ball.spin.set(0, 0, 0);
+  if (options.spin || options.curve !== undefined) {
+    if (!ball.spin) ball.spin = new THREE.Vector3();
+    if (options.spin) ball.spin.copy(options.spin);
+    if (options.curve !== undefined) ball.spin.y = options.curve;
+  }
+}
+
+/** Apply a precomputed trajectory from PassingSystem or ShootingSystem. */
+export function applyBallTrajectory(ball: SimBall, velocity: THREE.Vector3, spin?: THREE.Vector3) {
+  ball.velocity.copy(velocity);
+  if (spin) {
+    if (!ball.spin) ball.spin = new THREE.Vector3();
+    ball.spin.copy(spin);
+  } else if (ball.spin) {
+    ball.spin.set(0, 0, 0);
+  }
+  return ball;
 }
