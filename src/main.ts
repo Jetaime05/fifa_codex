@@ -45,6 +45,8 @@ import { HudController } from "./rendering/HudController";
 import { MinimapController } from "./rendering/MinimapController";
 import { addPitch as addWorldPitch, createBallVisual, createPlayerVisual } from "./rendering/WorldFactory";
 import { createGameScene } from "./rendering/SceneFactory";
+import { PlayerAnimationSystem } from "./rendering/PlayerPresentation";
+import { MatchAudio, type MatchAudioCue } from "./audio/MatchAudio";
 import { manCity, realMadrid } from "./data/teams";
 import type { PlayerData, TeamData, TeamId } from "./data/types";
 import "./styles.css";
@@ -73,6 +75,7 @@ declare global {
         cameraMode: CameraMode;
         phase3: ReturnType<typeof phase3DebugState>;
         phase4: ReturnType<typeof phase4DebugState>;
+        phase5: ReturnType<typeof phase5DebugState>;
         phase2: {
           movement: { speed: number; maxSpeed: number; sprinting: boolean; stamina: number } | null;
           dribbling: { touchQuality: number; looseTouchRisk: number; looseTouch: boolean } | null;
@@ -134,7 +137,19 @@ app.innerHTML = `
         <div class="feed" data-feed></div>
       </div>
       <div class="minimap" data-minimap></div>
+      <div class="goal-moment" data-goal-moment hidden aria-live="polite"><small>ELITE KICKOFF · GOAL</small><strong data-goal-scorer></strong><span data-goal-score></span></div>
+      <button class="hud-toggle" data-hud-toggle type="button" aria-pressed="false">Clean view</button>
       <div class="ai-settings" data-ai-settings>
+        <details class="rules-options presentation-options" data-presentation-options>
+          <summary>Picture & sound</summary>
+          <label>Weather <select data-weather aria-label="Weather"><option value="clear">Clear evening</option><option value="rain">Rain</option></select></label>
+          <label><input type="checkbox" data-reduced-motion> Reduce motion / effects</label>
+          <button type="button" data-sound-enable>Enable sound</button>
+          <label>Volume <input type="range" data-volume aria-label="Sound volume" min="0" max="100" value="40"></label>
+          <label>Sound check <select data-sound-cue aria-label="Sound check"><option>pass</option><option>shot</option><option>tackle</option><option>whistle</option><option>goal</option><option>kick</option><option>save</option><option>ui</option></select></label>
+          <button type="button" data-sound-test>Play cue</button>
+          <small data-audio-status role="status">Sound off · enable when ready.</small>
+        </details>
         <label>Difficulty <select data-ai-difficulty aria-label="AI difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
         <label><input type="checkbox" data-ai-debug> AI debug</label>
         <label><input type="checkbox" data-ai-spectator> Watch AI vs AI</label>
@@ -218,6 +233,20 @@ const spectatorToggle = document.querySelector<HTMLInputElement>("[data-ai-spect
 const aiDebugPanel = document.querySelector<HTMLPreElement>("[data-ai-debug-panel]")!;
 const matchLengthSelect = document.querySelector<HTMLSelectElement>("[data-match-length]")!;
 const resultStatsEl = document.querySelector<HTMLDivElement>("[data-result-stats]")!;
+const soundEnableButton = document.querySelector<HTMLButtonElement>("[data-sound-enable]")!;
+const audioStatusEl = document.querySelector<HTMLElement>("[data-audio-status]")!;
+const goalMomentEl = document.querySelector<HTMLElement>("[data-goal-moment]")!;
+const motionToggle = document.querySelector<HTMLInputElement>("[data-reduced-motion]")!;
+let reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+motionToggle.checked = reducedMotion;
+const playerAnimations = new PlayerAnimationSystem();
+const matchAudio = new MatchAudio();
+matchAudio.setVolume(0.4);
+let soundEnabled = false;
+let soundBusy = false;
+let goalMomentRemaining = 0;
+let dribbleSoundRemaining = 0;
+const frameTimes: number[] = [];
 const hudController = new HudController({ score: scoreEl, clock: clockEl, camera: cameraChip, possession: possessionChip, playerName: playerNameEl, playerRole: playerRoleEl, playerStatus: playerStatusEl, stamina: staminaEl });
 const minimapController = new MinimapController(minimapEl, { halfWidth: HALF_W, halfLength: HALF_L });
 
@@ -281,7 +310,7 @@ const matchController = new MatchController({
     addFeed(`Camera switched to ${nextCameraMode}.`);
   },
   restart: () => resetMatch(),
-  pause: () => matchState.status === "paused" ? matchFlow.resume() : matchFlow.pause()
+  pause: () => togglePause()
 });
 
 const ball = {
@@ -326,9 +355,17 @@ function setupPlayers() {
 }
 
 function resetMatch() {
+  playerAnimations.reset();
+  stadium.reset();
+  matchAudio.reset();
+  goalMomentRemaining = 0;
+  dribbleSoundRemaining = 0;
+  goalMomentEl.hidden = true;
   cameraSystem.clearGoalEmphasis();
   matchState.duration = Number(matchLengthSelect.value);
   matchFlow.reset();
+  matchAudio.setActive(!document.hidden);
+  audioStatusEl.textContent = soundEnabled ? "Sound on · pauses with the match." : "Sound off · enable when ready.";
   matchStats.reset();
   referee.reset();
   feedEl.replaceChildren();
@@ -406,10 +443,11 @@ function prepareRestart(plan: RestartPlan, startCountdown = true) {
   lastTouch = null;
   if (restartPlacement.taker?.team === "home") setActivePlayer(restartPlacement.taker as Player);
   if (startCountdown) {
+    matchAudio.play("whistle");
     matchFlow.beginRestart();
     const stat = plan.kind === "corner" ? "corners" : plan.kind === "throwIn" ? "throwIns" : plan.kind === "goalKick" ? "goalKicks" : null;
     if (stat) matchStats.record(plan.team, stat);
-    cameraSystem.goalEmphasis(ball.position.clone());
+    if (!reducedMotion) cameraSystem.goalEmphasis(ball.position.clone());
   } else matchRules.resetGoalLock();
   addFeed(`${plan.kind}: ${plan.team === "home" ? "Real Madrid" : "Man City"}. ${plan.reason}`);
 }
@@ -420,6 +458,7 @@ function executeRestart() {
   pendingRestart = null;
   restartPlacement = null;
   if (!plan || !placement?.taker) return;
+  if (plan.kind === "kickoff") matchAudio.play("whistle");
   const taker = placement.taker as Player;
   if (!attachBallTo(taker)) return;
   if (plan.kind === "penalty" || (plan.kind === "freeKick" && !plan.reason.toLowerCase().includes("offside") && ball.position.z * (plan.team === "home" ? 1 : -1) > HALF_L - 26)) shootBall(taker);
@@ -530,12 +569,20 @@ function passBall(player: Player, intendedTarget?: Player, restartKind?: string)
   matchStats.record(player.team, "passes");
   pendingShot = null;
   lastPassPlan = plan;
+  if (!reducedMotion) playerAnimations.trigger(player.id, "pass");
+  matchAudio.play("pass");
   lastFeedback = plan.feedback;
   actionChip.textContent = plan.interception.interceptable
     ? `Pass risk ${Math.round(plan.feedback.interceptionRisk * 100)}%`
     : `Pass to ${plan.target.short}`;
   addMatchEvent(matchState, "pass", `${player.short} passes toward ${plan.target.short}.`);
   addFeed(`${player.short} threads a ${plan.interception.interceptable ? "risky " : "clean "}pass toward ${plan.target.short}.`);
+}
+
+function togglePause() {
+  if (matchState.status === "paused") matchFlow.resume(); else matchFlow.pause();
+  matchAudio.setActive(!document.hidden && matchState.status !== "paused");
+  audioStatusEl.textContent = soundEnabled ? (matchState.status === "paused" ? "Paused · sound is silent." : "Sound on · pauses with the match.") : "Sound off · enable when ready.";
 }
 
 function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
@@ -567,6 +614,9 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
   pendingPass = null;
   matchStats.record(player.team, "shots");
   lastShotPlan = plan;
+  if (!reducedMotion) playerAnimations.trigger(player.id, "shot");
+  stadium.shot(ball.position);
+  matchAudio.play("shot");
   pendingShot = { plan, defendingTeam };
   lastFeedback = plan.feedback;
   actionChip.textContent = `${shotType === "power" ? "Power" : "Finesse"} ${Math.round(plan.accuracy * 100)}%`;
@@ -580,6 +630,8 @@ function tackle(player: Player) {
   if (!target || target.team === player.team || player.cooldown > 0) return;
   const dist = target.position.distanceTo(player.position);
   if (dist < 3.2) {
+    if (!reducedMotion) playerAnimations.trigger(player.id, "tackle");
+    matchAudio.play("tackle");
     const success = player.stats.defending + player.stats.physical * 0.4 + rand(0, 35);
     const resistance = target.stats.dribbling + target.stats.physical * 0.28 + rand(0, 35);
     player.cooldown = 0.65;
@@ -679,6 +731,8 @@ function clearBall(player: Player) {
   pendingPass = null;
   pendingShot = null;
   kickBall(ball, target, 30, 2.8);
+  if (!reducedMotion) playerAnimations.trigger(player.id, "kick");
+  matchAudio.play("kick");
   lastFeedback = null;
   matchStats.record(player.team, "clearances");
   actionChip.textContent = "Clearance into space";
@@ -795,10 +849,17 @@ function scoreGoal(team: TeamId) {
   referee.onGoal();
   nextKickoffTeam = team === "home" ? "away" : "home";
   matchFlow.beginGoal();
+  matchAudio.play("goal");
+  stadium.goal(team, ball.position);
+  if (!reducedMotion && lastTouch?.team === team) playerAnimations.trigger(lastTouch.id, "celebrate");
+  goalMomentRemaining = 2.4;
+  goalMomentEl.querySelector<HTMLElement>("[data-goal-scorer]")!.textContent = scorer;
+  goalMomentEl.querySelector<HTMLElement>("[data-goal-score]")!.textContent = scoreText(matchState);
+  goalMomentEl.hidden = false;
   pendingPass = null;
   const goalText = matchState.events[0]?.description ?? `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`;
   pendingShot = null;
-  cameraSystem.goalEmphasis(ball.position.clone());
+  if (!reducedMotion) cameraSystem.goalEmphasis(ball.position.clone(), { duration: 2.3, strength: 0.9 });
   addFeed(goalText);
   updateHud();
 }
@@ -831,6 +892,10 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   }, rand);
   keeperBrains.set(keeper.id, goalkeeperSystem.createDebugSnapshot(keeper, { reaction: lastKeeperResult.plan }));
   pending.keeperAttempted = true;
+  if (!reducedMotion && lastKeeperResult.plan.action === "dive") {
+    const localTarget = lastKeeperResult.plan.targetPosition.clone().sub(keeper.position).applyQuaternion(keeper.mesh.quaternion.clone().invert());
+    playerAnimations.trigger(keeper.id, "dive", localTarget.x > 0 ? -1 : 1);
+  }
 
   if (lastKeeperResult.outcome === "goal") {
     return false;
@@ -838,6 +903,7 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   pendingShot = null;
 
   matchStats.record(keeper.team, "saves");
+  matchAudio.play("save");
   lastTouch = keeper;
   const awayFromGoal = pending.defendingTeam === "home" ? 1 : -1;
   ball.position.copy(keeper.position).add(new THREE.Vector3(0, BALL_RADIUS, awayFromGoal * 0.8));
@@ -966,6 +1032,7 @@ function updateMinimap() {
 }
 
 function endMatch() {
+  matchAudio.play("fulltime");
   addMatchEvent(matchState, "fullTime", "Full time.");
   resultScoreEl.textContent = `Real Madrid ${scoreText(matchState)} Man City`;
   const stats = matchStats.snapshot;
@@ -1050,15 +1117,39 @@ function phase4DebugState() {
     ballPosition: ball.position.toArray(), lastTouch: lastTouch?.id ?? null };
 }
 
+function phase5DebugState() {
+  const sorted = [...frameTimes].sort((a, b) => a - b);
+  return { animations: playerAnimations.debugSnapshot(), stadium: stadium.debugSnapshot(), audio: matchAudio.debugSnapshot(), reducedMotion,
+    renderer: { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures, pixelRatio: renderer.getPixelRatio() },
+    frames: { samples: sorted.length, medianMs: sorted[Math.floor(sorted.length / 2)] ?? 0, p95Ms: sorted[Math.floor(sorted.length * 0.95)] ?? 0 } };
+}
+
+function updatePresentation(dt: number) {
+  if (matchState.status === "paused" || document.hidden) return;
+  if (!reducedMotion) playerAnimations.update(players, dt * GAME_SPEED, matchState.status === "playing");
+  stadium.update(dt, ball.position, ballOwner ? 0 : ball.velocity.length());
+  if (goalMomentRemaining > 0) {
+    goalMomentRemaining = Math.max(0, goalMomentRemaining - dt);
+    goalMomentEl.hidden = goalMomentRemaining === 0;
+  }
+  dribbleSoundRemaining -= dt;
+  if (matchState.status === "playing" && ballOwner && ballOwner.velocity.length() > 2 && dribbleSoundRemaining <= 0) {
+    matchAudio.play("kick");
+    dribbleSoundRemaining = 0.55;
+  }
+}
+
 function updateAIDebugPanel() {
   const playerTop = document.querySelector<HTMLElement>(".player-panel")!.getBoundingClientRect().top;
+  document.querySelector<HTMLElement>(".game-root")!.style.setProperty("--hud-clean-top", `${playerTop - 38}px`);
+  const panelBoundary = playerTop - (window.innerWidth <= 760 ? 42 : 0);
   const settingsTop = aiSettings.getBoundingClientRect().top;
-  aiSettings.style.maxHeight = `${Math.max(64, playerTop - settingsTop - (aiDebugToggle.checked ? 80 : 12))}px`;
+  aiSettings.style.maxHeight = `${Math.max(64, panelBoundary - settingsTop - (aiDebugToggle.checked ? 80 : 12))}px`;
   aiDebugPanel.hidden = !aiDebugToggle.checked;
   if (aiDebugPanel.hidden) return;
   const panelTop = aiSettings.getBoundingClientRect().bottom + 10;
   aiDebugPanel.style.top = `${panelTop}px`;
-  aiDebugPanel.style.maxHeight = `${Math.max(20, playerTop - panelTop - 10)}px`;
+  aiDebugPanel.style.maxHeight = `${Math.max(20, panelBoundary - panelTop - 10)}px`;
   const debug = phase3DebugState();
   const decisions = debug.decisions;
   const focused = decisions.find((decision) => decision.playerId === ballOwner?.id) ?? decisions.find((decision) => decision.possession === "opponent") ?? decisions[0];
@@ -1078,7 +1169,10 @@ function updateAIDebugPanel() {
 }
 
 function step() {
-  const rawDt = Math.min(clock.getDelta(), 0.04);
+  const frameDt = clock.getDelta();
+  if (!document.hidden && frameDt > 0) { frameTimes.push(frameDt * 1000); if (frameTimes.length > 120) frameTimes.shift(); }
+  const rawDt = Math.min(frameDt, 0.04);
+  matchAudio.setActive(!document.hidden && matchState.status !== "paused");
   fixedTimestep.advance(rawDt, (fixedDt) => {
     const dt = fixedDt * GAME_SPEED;
     handleActions();
@@ -1087,7 +1181,7 @@ function step() {
       matchFlow.addStoppageTime(referee.consumeStoppageSeconds());
     }
     for (const event of matchFlow.update(fixedDt)) {
-      if (event.type === "halftime") { nextKickoffTeam = "away"; referee.clearPending(); addFeed("Half time. Ends remain unchanged in this prototype."); }
+      if (event.type === "halftime") { nextKickoffTeam = "away"; referee.clearPending(); matchAudio.play("whistle"); addFeed("Half time. Ends remain unchanged in this prototype."); }
       if (event.type === "kickoffSetup") prepareRestart(createRestartPlan({ kind: "kickoff", team: nextKickoffTeam, bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS }), false);
       if (event.type === "kickoffReady" || event.type === "restartReady") executeRestart();
       if (event.type === "fullTime") endMatch();
@@ -1115,6 +1209,7 @@ function step() {
     matchStats.addPossession(ballOwner?.team ?? null, fixedDt);
   });
   updateCamera(rawDt);
+  updatePresentation(rawDt);
   updateHud();
   if (!isMatchEnded(matchState)) updateMinimap();
 
@@ -1141,9 +1236,10 @@ function updateRenderDebug() {
     phase2: phase2DebugState(),
     phase3: phase3DebugState(),
     phase4: phase4DebugState(),
+    phase5: phase5DebugState(),
     stateHash: stateHash({ elapsed: matchState.elapsed, score: matchState.score, owner: matchState.ballOwnerId, active: matchState.activePlayerId, ball: ball.position.toArray(), velocity: ball.velocity.toArray() })
   });
-  if (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000) {
+  if (aiDebugToggle.checked && (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000)) {
     lastFrameCaptureAt = now;
     renderDebugEl.dataset.frame = renderer.domElement.toDataURL("image/jpeg", 0.76);
   }
@@ -1163,13 +1259,14 @@ function setupInput() {
   // Settings use native keyboard semantics. Detach gameplay listeners and
   // discard held keys while a form control owns focus, preventing Space/Tab/R
   // from pausing, switching player, or resetting while selecting difficulty.
-  aiSettings.addEventListener("focusin", () => {
+  document.addEventListener("focusin", (event) => {
+    if (!(event.target instanceof HTMLElement) || !event.target.closest("button, input, select, summary")) return;
     keyboardInput.detach();
     keyboardInput = new KeyboardInput();
   });
-  aiSettings.addEventListener("focusout", () => {
+  document.addEventListener("focusout", () => {
     queueMicrotask(() => {
-      if (!aiSettings.contains(document.activeElement)) keyboardInput.attach();
+      if (!(document.activeElement instanceof HTMLElement) || !document.activeElement.closest("button, input, select, summary")) keyboardInput.attach();
     });
   });
   difficultySelect.addEventListener("change", () => {
@@ -1192,13 +1289,58 @@ function setupInput() {
   });
   aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch());
   aiSettings.querySelector<HTMLButtonElement>("[data-match-pause]")!.addEventListener("click", () => {
-    if (matchState.status === "paused") matchFlow.resume(); else matchFlow.pause();
+    togglePause();
   });
   aiSettings.querySelectorAll<HTMLInputElement>("[data-rule]").forEach((input) => input.addEventListener("change", () => {
     referee.setOptions({ [input.dataset.rule!]: input.checked });
     matchFlow.setStoppageTimeEnabled(referee.options.injuryTime);
   }));
-  aiSettings.querySelector("details")!.addEventListener("toggle", updateAIDebugPanel);
+  aiSettings.querySelectorAll("details").forEach((details) => details.addEventListener("toggle", updateAIDebugPanel));
+  aiSettings.querySelector<HTMLSelectElement>("[data-weather]")!.addEventListener("change", (event) => {
+    stadium.setWeather((event.target as HTMLSelectElement).value as "clear" | "rain");
+  });
+  motionToggle.addEventListener("change", () => {
+    reducedMotion = motionToggle.checked;
+    playerAnimations.reset();
+    cameraSystem.clearGoalEmphasis();
+    stadium.setReducedMotion(reducedMotion);
+    document.querySelector(".game-root")!.classList.toggle("reduced-motion", reducedMotion);
+  });
+  soundEnableButton.addEventListener("click", async () => {
+    if (soundBusy) return;
+    if (soundEnabled && matchAudio.debugSnapshot().contextState === "running") {
+      soundEnabled = false; matchAudio.setMuted(true);
+    } else {
+      soundBusy = true;
+      soundEnableButton.disabled = true;
+      soundEnabled = await matchAudio.enable();
+      soundBusy = false;
+      soundEnableButton.disabled = false;
+    }
+    soundEnableButton.textContent = soundEnabled ? "Mute sound" : "Enable sound";
+    audioStatusEl.textContent = soundEnabled ? "Sound on · pauses with the match." : matchAudio.debugSnapshot().error ?? "Sound off · enable to retry or unmute.";
+    if (soundEnabled) matchAudio.play("ui");
+  });
+  aiSettings.querySelector<HTMLInputElement>("[data-volume]")!.addEventListener("input", (event) => {
+    matchAudio.setVolume(Number((event.target as HTMLInputElement).value) / 100);
+  });
+  aiSettings.querySelector<HTMLButtonElement>("[data-sound-test]")!.addEventListener("click", () => {
+    const cue = aiSettings.querySelector<HTMLSelectElement>("[data-sound-cue]")!.value as MatchAudioCue;
+    audioStatusEl.textContent = matchAudio.play(cue) ? `Playing ${cue}.` : "Enable sound and resume the match to audition.";
+  });
+  document.querySelector<HTMLButtonElement>("[data-hud-toggle]")!.addEventListener("click", (event) => {
+    const clean = document.querySelector(".game-root")!.classList.toggle("cinematic");
+    const button = event.currentTarget as HTMLButtonElement;
+    button.textContent = clean ? "Show controls" : "Clean view";
+    button.setAttribute("aria-pressed", String(clean));
+    matchAudio.play("ui");
+    updateAIDebugPanel();
+  });
+  aiSettings.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest("button") && !(event.target as HTMLElement).closest("[data-sound-test],[data-sound-enable]")) matchAudio.play("ui");
+  });
+  document.addEventListener("visibilitychange", () => matchAudio.setActive(!document.hidden && matchState.status !== "paused"));
+  window.addEventListener("pagehide", () => matchAudio.setActive(false));
   canvas.addEventListener("pointerdown", (event) => {
     pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
     pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -1239,13 +1381,15 @@ function sampleCanvas() {
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 
 window.addEventListener("resize", onResize);
 
-addWorldPitch(scene);
+const stadium = addWorldPitch(scene);
+stadium.setReducedMotion(reducedMotion);
+document.querySelector(".game-root")!.classList.toggle("reduced-motion", reducedMotion);
 setupPlayers();
 scene.add(ball.mesh);
 setupInput();
@@ -1259,7 +1403,8 @@ window.__eliteKickoffDebug = {
     cameraMode: matchState.cameraMode,
     phase2: phase2DebugState(),
     phase3: phase3DebugState(),
-    phase4: phase4DebugState()
+    phase4: phase4DebugState(),
+    phase5: phase5DebugState()
   })
 };
 resetMatch();

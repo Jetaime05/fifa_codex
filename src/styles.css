@@ -471,7 +471,24 @@ body {
   font-weight: 900;
 }
 
-.ai-settings { overflow-y: auto; }
+.ai-settings { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #657d8b #101e28; }
+.presentation-options { padding-bottom: 8px; border-bottom: 1px solid #ffffff24; }
+.presentation-options summary { color: #cbe8ff; font-weight: 800; }
+.presentation-options button { margin-top: 8px; }
+.presentation-options input[type="range"] { min-width: 40px; width: 105px; }
+.hud-toggle { pointer-events: auto; position: absolute; bottom: 112px; left: 50%; transform: translateX(-50%); border: 1px solid #ffffff40; border-radius: 30px; padding: 7px 14px; background: #101e28dc; color: #f5f8ff; font: 700 11px system-ui; cursor: pointer; }
+.hud-toggle:focus-visible { outline: 2px solid #ffe26c; outline-offset: 3px; }
+.cinematic .hud-toggle { top: auto; bottom: 20px; }
+.cinematic .ai-settings, .cinematic .ai-debug-panel, .cinematic .controls, .cinematic .top-left, .cinematic .player-panel, .cinematic .minimap, .cinematic .mobile-pad { display: none; }
+.goal-moment { position: absolute; top: 28%; left: 50%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); display: grid; justify-items: center; gap: 7px; padding: 22px; border-top: 3px solid #f9d576; background: linear-gradient(110deg, #102638f5, #08121df2); box-shadow: 0 15px 70px #0008; text-align: center; animation: goal-arrival .25s ease-out; }
+.goal-moment[hidden] { display: none; }
+.goal-moment small { color: #f9d576; letter-spacing: .18em; font-size: 10px; font-weight: 800; }
+.goal-moment strong { font-size: clamp(24px, 5vw, 36px); }
+.goal-moment span { font-size: 30px; font-weight: 900; }
+.reduced-motion .goal-moment { animation: none; }
+@keyframes goal-arrival { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) { .goal-moment { animation: none; } }
+@media (max-width: 760px) { .hud-toggle { top: var(--hud-clean-top, calc(100dvh - 274px)); bottom: auto; } }
 .rules-options {
   flex-basis: 100%;
   grid-column: 1 / -1;
