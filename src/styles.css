@@ -281,6 +281,77 @@ body {
   transform: translate(-50%, -50%);
 }
 
+.ai-settings {
+  pointer-events: auto;
+  position: absolute;
+  top: 250px;
+  right: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px 12px;
+  width: 230px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(7, 15, 14, 0.88);
+  font-size: 0.72rem;
+}
+
+.ai-settings label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.ai-settings select {
+  min-height: 32px;
+  border: 1px solid #79968b;
+  border-radius: 5px;
+  background: #142c23;
+  color: #f7f5ef;
+  font: inherit;
+}
+
+.ai-settings input { accent-color: #f2cf58; }
+
+.ai-settings button {
+  border: 1px solid #79968b;
+  border-radius: 5px;
+  padding: 5px 8px;
+  background: #142c23;
+  color: #f7f5ef;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ai-settings :focus-visible {
+  outline: 2px solid #ffe26c;
+  outline-offset: 3px;
+}
+
+.ai-debug-panel {
+  pointer-events: auto;
+  position: absolute;
+  top: 354px;
+  right: 16px;
+  width: min(390px, calc(100vw - 32px));
+  max-height: calc(100vh - 490px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 226, 108, 0.4);
+  border-radius: 8px;
+  background: rgba(4, 14, 11, 0.92);
+  color: #e0f4e8;
+  font: 11px/1.5 ui-monospace, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-debug-panel[hidden] { display: none; }
+
 .controls {
   pointer-events: auto;
   position: absolute;
@@ -421,6 +492,26 @@ body {
 }
 
 @media (max-width: 760px) {
+  .ai-settings {
+    top: 174px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    left: 10px;
+    right: 10px;
+    width: auto;
+    gap: 8px;
+    padding: 7px;
+    font-size: 0.68rem;
+  }
+
+  .ai-debug-panel {
+    top: 282px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-height: max(70px, calc(100vh - 560px));
+    font-size: 10px;
+  }
   .scoreboard {
     top: 10px;
     gap: 7px;

@@ -15,4 +15,21 @@ describe("PossessionSystem", () => {
     expect(result?.owner).toBe(home);
     expect(result?.shouldControlOwner).toBe(false);
   });
+
+  it("prevents immediate self-recollection without blocking another receiver", () => {
+    const passer = player("passer", "home", 0, 0);
+    const receiver = player("receiver", "home", 1, 0);
+    const away = player("away", "away", 20, 20);
+    const input = { players: [passer, receiver, away], homePlayers: [passer, receiver], awayPlayers: [away], activePlayer: passer, ballOwner: null, ballPosition: new THREE.Vector3(0.1, 0.55, 0), random: () => 0 };
+    expect(resolvePossession({ ...input, excludedPlayerIds: [passer.id] })?.owner).toBe(receiver);
+    expect(resolvePossession(input)?.owner).toBe(passer);
+  });
+
+  it("awards a loose ball by proximity, not home-first array order", () => {
+    const home = player("home", "home", 1.1, 0);
+    const away = player("away", "away", 0.2, 0);
+    const input = { homePlayers: [home], awayPlayers: [away], activePlayer: home, ballOwner: null, ballPosition: new THREE.Vector3(0, 0.55, 0), random: () => 0 };
+    expect(resolvePossession({ ...input, players: [home, away] })?.owner).toBe(away);
+    expect(resolvePossession({ ...input, players: [away, home] })?.owner).toBe(away);
+  });
 });

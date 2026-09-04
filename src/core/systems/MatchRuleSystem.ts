@@ -17,6 +17,10 @@ export class MatchRuleSystem {
   get isGoalLocked() { return this.goalLocked; }
 }
 
+export function isInsideGoalMouth(positionX: number, positionY: number, goalWidth: number) {
+  return Math.abs(positionX) < goalWidth / 2 && positionY < 4.8;
+}
+
 export function isGoalCrossed(positionZ: number, positionX: number, positionY: number, halfLength: number, goalWidth: number, depth = 0.8) {
-  return Math.abs(positionX) < goalWidth / 2 && positionY < 4.8 && Math.abs(positionZ) > halfLength + depth;
+  return isInsideGoalMouth(positionX, positionY, goalWidth) && Math.abs(positionZ) > halfLength + depth;
 }

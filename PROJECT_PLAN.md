@@ -1522,6 +1522,15 @@ Demo Evidence:
 - Clip of AI defensive shape.
 - Table comparing Easy/Normal/Hard behavior.
 
+Phase 3 gate status (2026-09-04):
+
+- Phase 3A–3E implementation and automated behavior gates accepted. Runtime now uses persistent utility decisions, spatial team movement, a native difficulty selector, optional AI debug, and the goalkeeper brain.
+- Seeded runtime-timestep acceptance (240 clock-second steps / 372 simulation seconds) produces 165 pass attempts, 45 completed passes, 10 shots, 4 goals and 6 saves; maximum two AI pressers per team, finite state, and no difficulty speed bonus.
+- Desktop/mobile browser smoke checks cover rendering, settings, spectator mode, debug output, restart, pause and camera controls. Both teams completed passes during the rendered smoke run.
+- The old endline rebound blocked normal 60 Hz goals; fixed with regression coverage in both directions. Kick recollection, roster-order collection bias, extra carrier marking and stale rebound saves were also corrected during PM review.
+- Detailed evidence, profile comparison and limitations: `artifacts/phase3/QA.md`. Headless results are not an exact full-match UI replay; recorded build-up/defensive clips remain presentation follow-ups.
+- Remaining tuning: prototype pass-completion/attack balance and the existing bundle-size warning. Full rules remain Phase 4 scope.
+
 Out of Scope:
 
 - Self-play ML.

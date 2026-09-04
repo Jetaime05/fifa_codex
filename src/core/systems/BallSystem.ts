@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { TeamId } from "../../data/types";
 import type { FieldBounds, SimBall, SimPlayer } from "./types";
-import { isGoalCrossed } from "./MatchRuleSystem";
+import { isGoalCrossed, isInsideGoalMouth } from "./MatchRuleSystem";
 
 type BallPhysicsInput = {
   ball: SimBall;
@@ -87,7 +87,9 @@ export function updateBallPhysics({
       onGoal(ball.position.z > 0 ? "home" : "away");
       return;
     }
-    if (Math.abs(ball.position.z) > bounds.halfLength - ballRadius && !isGoalCrossed(ball.position.z, ball.position.x, ball.position.y, bounds.halfLength, goalWidth)) {
+    // Leave the goal mouth open while the ball travels from the pitch edge
+    // to the scoring plane. Bouncing here used to make 60 Hz goals impossible.
+    if (!isInsideGoalMouth(ball.position.x, ball.position.y, goalWidth)) {
       ball.position.z = Math.sign(ball.position.z) * (bounds.halfLength - ballRadius);
       ball.velocity.z *= -0.42;
     }

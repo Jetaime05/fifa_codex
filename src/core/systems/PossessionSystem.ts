@@ -9,6 +9,8 @@ type PossessionInput = {
   ballOwner: SimPlayer | null;
   ballPosition: THREE.Vector3;
   random: (min: number, max: number) => number;
+  /** Players temporarily ineligible to recollect their own freshly released ball. */
+  excludedPlayerIds?: readonly string[];
 };
 
 export type PossessionResolution = {
@@ -40,12 +42,13 @@ export function resolvePossession({
   activePlayer,
   ballOwner,
   ballPosition,
-  random
+  random,
+  excludedPlayerIds = []
 }: PossessionInput): PossessionResolution | null {
   if (ballOwner) {
     const opponents = ballOwner.team === "home" ? awayPlayers : homePlayers;
     const opponent = findNearestPlayer(opponents, ballOwner.position, true);
-    if (opponent.position.distanceTo(ballOwner.position) < 1.35) {
+    if (opponent && opponent.position.distanceTo(ballOwner.position) < 1.35) {
       const keeperBonus = opponent.role === "GK" ? 28 : 0;
       const challenge =
         opponent.stats.defending + opponent.stats.physical * 0.28 + keeperBonus + random(0, 26);
@@ -61,16 +64,21 @@ export function resolvePossession({
     return null;
   }
 
+  let collector: SimPlayer | null = null;
+  let closestDistance = Number.POSITIVE_INFINITY;
   for (const player of players) {
+    if (excludedPlayerIds.includes(player.id)) continue;
     const distance = player.position.distanceTo(ballPosition);
     const catchRadius = player.role === "GK" ? 2.6 : 1.55;
     if (distance < catchRadius && ballPosition.y < (player.role === "GK" ? 3.1 : 1.8)) {
-      return {
-        owner: player,
-        shouldControlOwner: player.team === "home" && player !== activePlayer
-      };
+      if (distance < closestDistance || (distance === closestDistance && player.id < (collector?.id ?? ""))) {
+        collector = player;
+        closestDistance = distance;
+      }
     }
   }
-
-  return null;
+  return collector ? {
+    owner: collector,
+    shouldControlOwner: collector.team === "home" && collector !== activePlayer
+  } : null;
 }

@@ -42,4 +42,30 @@ describe("BallSystem trajectory compatibility", () => {
     });
     expect(Math.abs(ball.velocity.x)).toBeGreaterThan(0);
   });
+
+  it.each([1, -1])("lets a normal 60 Hz shot cross the open goal mouth (direction %s)", (direction) => {
+    const ball = makeBall();
+    ball.position.z = 54 * direction;
+    ball.velocity.z = 18 * direction;
+    let scored: string | null = null;
+    for (let frame = 0; frame < 60 && !scored; frame++) {
+      updateBallPhysics({ ball, ballOwner: null, dt: 1 / 60,
+        bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+        playerForward: () => new THREE.Vector3(0, 0, direction), onGoal: (team) => { scored = team; } });
+    }
+    expect(scored).toBe(direction === 1 ? "home" : "away");
+  });
+
+  it.each([{ x: 10, y: 0.55 }, { x: 0, y: 6 }])("still rebounds outside the goal opening: %o", ({ x, y }) => {
+    const ball = makeBall();
+    ball.position.set(x, y, 55.4);
+    ball.velocity.z = 18;
+    let scored = false;
+    updateBallPhysics({ ball, ballOwner: null, dt: 1 / 60,
+      bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+      playerForward: () => new THREE.Vector3(0, 0, 1), onGoal: () => { scored = true; } });
+    expect(scored).toBe(false);
+    expect(ball.position.z).toBeCloseTo(55.45);
+    expect(ball.velocity.z).toBeLessThan(0);
+  });
 });

@@ -26,7 +26,9 @@ import { stateHash } from "./core/debug/stateHash";
 import { FixedTimestep } from "./core/simulation/FixedTimestep";
 import { MatchRuleSystem } from "./core/systems/MatchRuleSystem";
 import { CameraSystem } from "./core/systems/CameraSystem";
-import { updateAI as updateAISystem } from "./core/systems/AISystem";
+import { FootballAISystem } from "./core/systems/AISystem";
+import { getAIDifficulty } from "./core/systems/AIDifficulty";
+import type { AIDifficultyLevel } from "./core/systems/AIDifficulty";
 import { DribblingSystem } from "./core/systems/DribblingSystem";
 import type { DribblingResult } from "./core/systems/DribblingSystem";
 import { FirstTouchSystem } from "./core/systems/FirstTouchSystem";
@@ -35,8 +37,8 @@ import { executePass } from "./core/systems/PassingSystem";
 import type { PassFeedbackEvent, PassPlan } from "./core/systems/PassingSystem";
 import { executeShot } from "./core/systems/ShootingSystem";
 import type { ShotFeedbackEvent, ShotPlan } from "./core/systems/ShootingSystem";
-import { GoalkeeperSystem } from "./core/systems/GoalkeeperSystem";
-import type { KeeperReactionAction, KeeperSaveResult } from "./core/systems/GoalkeeperSystem";
+import { GoalkeeperSystem, isBallApproachingGoal } from "./core/systems/GoalkeeperSystem";
+import type { KeeperBrainSnapshot, KeeperDistributionChoice, KeeperReactionAction, KeeperSaveResult } from "./core/systems/GoalkeeperSystem";
 import { KeyboardInput } from "./core/input/KeyboardInput";
 import { TouchInput } from "./core/input/TouchInput";
 import { MatchController } from "./core/input/MatchController";
@@ -70,6 +72,7 @@ declare global {
         clock: string;
         ballOwner: string;
         cameraMode: CameraMode;
+        phase3: ReturnType<typeof phase3DebugState>;
         phase2: {
           movement: { speed: number; maxSpeed: number; sprinting: boolean; stamina: number } | null;
           dribbling: { touchQuality: number; looseTouchRisk: number; looseTouch: boolean } | null;
@@ -131,6 +134,13 @@ app.innerHTML = `
         <div class="feed" data-feed></div>
       </div>
       <div class="minimap" data-minimap></div>
+      <div class="ai-settings" data-ai-settings>
+        <label>Difficulty <select data-ai-difficulty aria-label="AI difficulty"><option value="easy">Easy</option><option value="normal" selected>Normal</option><option value="hard">Hard</option></select></label>
+        <label><input type="checkbox" data-ai-debug> AI debug</label>
+        <label><input type="checkbox" data-ai-spectator> Watch AI vs AI</label>
+        <button type="button" data-ai-restart>Restart</button>
+      </div>
+      <pre class="ai-debug-panel" data-ai-debug-panel hidden aria-label="AI decision details"></pre>
       <div class="player-panel">
         <div class="player-name" data-player-name>Vinicius Junior</div>
         <div class="player-meta">
@@ -190,6 +200,11 @@ const resultScoreEl = document.querySelector<HTMLElement>("[data-result-score]")
 const restartButton = document.querySelector<HTMLButtonElement>("[data-restart]")!;
 const stickEl = document.querySelector<HTMLElement>("[data-stick]")!;
 const renderDebugEl = document.querySelector<HTMLOutputElement>("[data-render-debug]")!;
+const aiSettings = document.querySelector<HTMLDivElement>("[data-ai-settings]")!;
+const difficultySelect = document.querySelector<HTMLSelectElement>("[data-ai-difficulty]")!;
+const aiDebugToggle = document.querySelector<HTMLInputElement>("[data-ai-debug]")!;
+const spectatorToggle = document.querySelector<HTMLInputElement>("[data-ai-spectator]")!;
+const aiDebugPanel = document.querySelector<HTMLPreElement>("[data-ai-debug-panel]")!;
 const hudController = new HudController({ score: scoreEl, clock: clockEl, camera: cameraChip, possession: possessionChip, playerName: playerNameEl, playerRole: playerRoleEl, playerStatus: playerStatusEl, stamina: staminaEl });
 const minimapController = new MinimapController(minimapEl, { halfWidth: HALF_W, halfLength: HALF_L });
 
@@ -212,7 +227,17 @@ const fixedTimestep = new FixedTimestep({ step: 1 / 60, maxSteps: 8 });
 const movementConfig = DEFAULT_MOVEMENT_CONFIG;
 const dribblingSystem = new DribblingSystem();
 const firstTouchSystem = new FirstTouchSystem();
-const goalkeeperSystem = new GoalkeeperSystem();
+let goalkeeperSystem = new GoalkeeperSystem();
+const footballAI = new FootballAISystem();
+let aiDifficulty: AIDifficultyLevel = "normal";
+let spectatorMode = false;
+const keeperBrains = new Map<string, KeeperBrainSnapshot>();
+const keeperDistributions = new Map<string, { choice: KeeperDistributionChoice; remaining: number }>();
+type TeamMatchTelemetry = { passes: number; completedPasses: number; shots: number; goals: number; clearances: number };
+const emptyTeamTelemetry = (): TeamMatchTelemetry => ({ passes: 0, completedPasses: 0, shots: 0, goals: 0, clearances: 0 });
+let matchTelemetry = { home: emptyTeamTelemetry(), away: emptyTeamTelemetry() };
+let pendingPass: { passerId: string; team: TeamId; targetId: string } | null = null;
+let releaseLock: { playerId: string; remaining: number } | null = null;
 const cameraSystem = new CameraSystem();
 
 let lastMovementResult: MovementResult | null = null;
@@ -222,12 +247,12 @@ let lastPassPlan: PassPlan | null = null;
 let lastShotPlan: ShotPlan | null = null;
 let lastKeeperResult: KeeperSaveResult | null = null;
 let lastFeedback: PassFeedbackEvent | ShotFeedbackEvent | null = null;
-let pendingShot: { plan: ShotPlan; defendingTeam: TeamId } | null = null;
+let pendingShot: { plan: ShotPlan; defendingTeam: TeamId; keeperAttempted?: boolean } | null = null;
 let lastCameraEmphasis = 0;
 let lastRenderDebugAt = 0;
 let lastFrameCaptureAt = 0;
 let goalResetTimer: ReturnType<typeof setTimeout> | null = null;
-const keyboardInput = new KeyboardInput();
+let keyboardInput = new KeyboardInput();
 let touchInput: TouchInput | undefined;
 const matchController = new MatchController({
   pass: () => passBall(activePlayer),
@@ -281,7 +306,7 @@ function setupPlayers() {
   awayPlayers = manCity.players.map((spec) => createPlayer(manCity, spec));
   players = [...homePlayers, ...awayPlayers];
   activePlayer = homePlayers.find((p) => p.short === "Vini Jr.") ?? homePlayers[8];
-  activePlayer.marker.material.opacity = 0.92;
+  activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
   activePlayer.marker.scale.setScalar(1.16);
 }
 
@@ -290,6 +315,7 @@ function resetMatch(keepScore = false) {
   cameraSystem.clearGoalEmphasis();
   if (!keepScore) {
     resetMatchState(matchState);
+    matchTelemetry = { home: emptyTeamTelemetry(), away: emptyTeamTelemetry() };
     matchOverEl.classList.remove("visible");
   } else {
     setMatchStatus(matchState, "playing");
@@ -302,7 +328,7 @@ function resetMatch(keepScore = false) {
     player.mesh.rotation.y = player.team === "home" ? 0 : Math.PI;
     player.hasBall = false;
     player.cooldown = 0;
-    player.stamina = Math.min(1, player.stamina + 0.18);
+    player.stamina = keepScore ? Math.min(1, player.stamina + 0.18) : 1;
     player.marker.material.opacity = player === activePlayer ? 0.92 : 0;
   });
 
@@ -317,6 +343,11 @@ function resetMatch(keepScore = false) {
   lastTouch = null;
   attackingTeam = "home";
   pendingShot = null;
+  pendingPass = null;
+  releaseLock = null;
+  footballAI.reset();
+  keeperBrains.clear();
+  keeperDistributions.clear();
   lastMovementResult = null;
   lastDribblingResult = null;
   lastFirstTouchResult = null;
@@ -337,7 +368,7 @@ function setActivePlayer(player: Player) {
   activePlayer.marker.scale.setScalar(1);
   activePlayer = player;
   setActivePlayerId(matchState, player.id);
-  activePlayer.marker.material.opacity = 0.92;
+  activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
   activePlayer.marker.scale.setScalar(1.16);
   updateHud();
 }
@@ -353,6 +384,14 @@ function addFeed(text: string) {
 }
 
 function attachBallTo(player: Player) {
+  pendingShot = null;
+  if (pendingPass) {
+    if (player.team === pendingPass.team && player.id !== pendingPass.passerId) {
+      matchTelemetry[player.team].completedPasses += 1;
+    }
+    pendingPass = null;
+  }
+  releaseLock = null;
   if (ballOwner && ballOwner !== player) {
     ballOwner.hasBall = false;
   }
@@ -434,6 +473,9 @@ function passBall(player: Player, intendedTarget?: Player) {
     return;
   }
   releaseBall();
+  releaseLock = { playerId: player.id, remaining: 0.22 };
+  pendingPass = { passerId: player.id, team: player.team, targetId: plan.target.id };
+  matchTelemetry[player.team].passes += 1;
   pendingShot = null;
   lastPassPlan = plan;
   lastFeedback = plan.feedback;
@@ -469,6 +511,9 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
     return;
   }
   releaseBall();
+  releaseLock = { playerId: player.id, remaining: 0.22 };
+  pendingPass = null;
+  matchTelemetry[player.team].shots += 1;
   lastShotPlan = plan;
   pendingShot = { plan, defendingTeam };
   lastFeedback = plan.feedback;
@@ -532,26 +577,44 @@ function updatePlayerMovement(player: Player, inputDirection: THREE.Vector3, spr
 }
 
 function updateAI(dt: number) {
-  const outfieldPlayers = players.filter((player) => player.role !== "GK");
-  updateAISystem({
-    players: outfieldPlayers,
+  footballAI.update({
+    players,
+    goalkeepersManagedExternally: true,
     ball,
     ballOwner,
-    activePlayer,
+    activePlayer: spectatorMode ? null : activePlayer,
     teams: { home: realMadrid, away: manCity },
     bounds: { halfWidth: HALF_W, halfLength: HALF_L },
     playerRadius: PLAYER_RADIUS,
     dt,
     random: rand,
-    onPass: (player) => passBall(player as Player),
+    onPass: (player, target) => passBall(player as Player, target as Player | undefined),
     onShoot: (player) => shootBall(player as Player),
+    onClear: (player) => clearBall(player as Player),
     onTackle: (player) => tackle(player as Player)
   });
   updateGoalkeepers(dt);
 }
 
+function clearBall(player: Player) {
+  if (ballOwner !== player) return;
+  const direction = player.team === "home" ? 1 : -1;
+  const target = player.position.clone().add(new THREE.Vector3(rand(-14, 14), 2.5, direction * 34));
+  releaseBall();
+  releaseLock = { playerId: player.id, remaining: 0.22 };
+  pendingPass = null;
+  pendingShot = null;
+  kickBall(ball, target, 30, 2.8);
+  lastFeedback = null;
+  matchTelemetry[player.team].clearances += 1;
+  actionChip.textContent = "Clearance into space";
+  addMatchEvent(matchState, "pass", `${player.short} clears under pressure.`);
+  addFeed(`${player.short} clears into space.`);
+}
+
 function updateGoalkeepers(dt: number) {
   for (const keeper of [...homePlayers, ...awayPlayers].filter((player) => player.role === "GK")) {
+    const positioning = goalkeeperSystem.getPositioning({ keeper, ball, bounds: { halfWidth: HALF_W, halfLength: HALF_L } });
     goalkeeperSystem.updateMovement({
       keeper,
       ball,
@@ -559,26 +622,33 @@ function updateGoalkeepers(dt: number) {
       dt,
       playerRadius: PLAYER_RADIUS
     });
-    if (ballOwner !== keeper || keeper.cooldown > 0) {
+    if (ballOwner !== keeper) {
+      keeperDistributions.delete(keeper.id);
+      const previousReaction = keeperBrains.get(keeper.id)?.reaction;
+      keeperBrains.set(keeper.id, { ...goalkeeperSystem.createDebugSnapshot(keeper, { positioning }), reaction: previousReaction });
       keeper.cooldown = Math.max(0, keeper.cooldown - dt);
       continue;
     }
 
     const teammates = keeper.team === "home" ? homePlayers : awayPlayers;
     const opponents = keeper.team === "home" ? awayPlayers : homePlayers;
+    let distributionState = keeperDistributions.get(keeper.id);
+    if (!distributionState) {
+      const choice = goalkeeperSystem.chooseDistribution(keeper, teammates, opponents);
+      distributionState = { choice, remaining: choice.releaseDelay };
+      keeperDistributions.set(keeper.id, distributionState);
+    }
+    distributionState.remaining -= dt;
+    keeperBrains.set(keeper.id, goalkeeperSystem.createDebugSnapshot(keeper, { positioning, distribution: distributionState.choice }));
+    if (distributionState.remaining > 0) continue;
+    // Re-scan once the scan delay expires, because opponents may have closed a lane.
     const distribution = goalkeeperSystem.chooseDistribution(keeper, teammates, opponents);
+    keeperBrains.set(keeper.id, goalkeeperSystem.createDebugSnapshot(keeper, { positioning, distribution }));
+    keeperDistributions.delete(keeper.id);
     if (distribution.target) {
       passBall(keeper, distribution.target as Player);
     } else {
-      const direction = keeper.team === "home" ? 1 : -1;
-      const clearTarget = keeper.position.clone().add(new THREE.Vector3(rand(-14, 14), 2.5, direction * 34));
-      releaseBall();
-      pendingShot = null;
-      kickBall(ball, clearTarget, 30, 2.8);
-      lastFeedback = null;
-      actionChip.textContent = "Keeper clearance";
-      addMatchEvent(matchState, "pass", `${keeper.short} clears under pressure.`);
-      addFeed(`${keeper.short} clears into space.`);
+      clearBall(keeper);
     }
     keeper.cooldown = 1.2;
   }
@@ -591,7 +661,7 @@ function updateBall(dt: number) {
       player: owner,
       ball,
       dt,
-      sprint: owner === activePlayer
+      sprint: owner === activePlayer && !spectatorMode
         ? keyboardInput.getState().sprint || Boolean(touchInput?.getState().sprint)
         : owner.velocity.length() > 8.8,
       playerForward,
@@ -635,6 +705,8 @@ function scoreGoal(team: TeamId) {
   }
   const scorer = lastTouch?.team === team ? lastTouch.short : team === "home" ? "Real Madrid" : "Manchester City";
   if (!matchRules.scoreGoal(team, () => `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`)) return;
+  matchTelemetry[team].goals += 1;
+  pendingPass = null;
   const goalText = matchState.events[0]?.description ?? `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`;
   pendingShot = null;
   cameraSystem.goalEmphasis(ball.position.clone());
@@ -645,7 +717,7 @@ function scoreGoal(team: TeamId) {
 
 function resolveGoalkeeperSave(scoringTeam: TeamId) {
   const pending = pendingShot;
-  if (!pending || pending.plan.shooter.team !== scoringTeam) {
+  if (!pending || pending.keeperAttempted || pending.plan.shooter.team !== scoringTeam) {
     return false;
   }
   const keeper = (pending.defendingTeam === "home" ? homePlayers : awayPlayers)
@@ -669,11 +741,13 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
     quality,
     shooter: plan.shooter
   }, rand);
-  pendingShot = null;
+  keeperBrains.set(keeper.id, goalkeeperSystem.createDebugSnapshot(keeper, { reaction: lastKeeperResult.plan }));
+  pending.keeperAttempted = true;
 
   if (lastKeeperResult.outcome === "goal") {
     return false;
   }
+  pendingShot = null;
 
   const awayFromGoal = pending.defendingTeam === "home" ? 1 : -1;
   ball.position.copy(keeper.position).add(new THREE.Vector3(0, BALL_RADIUS, awayFromGoal * 0.8));
@@ -695,6 +769,15 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
 }
 
 function resolvePossession() {
+  if (pendingShot && !isBallApproachingGoal(ball, pendingShot.defendingTeam)) pendingShot = null;
+  // Incoming shots use the keeper's reaction/save model once, never the
+  // generic loose-ball claim. A beaten keeper cannot re-roll at the goal line.
+  if (pendingShot) {
+    const keeper = players.find((player) => player.role === "GK" && player.team === pendingShot?.defendingTeam);
+    if (keeper && ball.position.y < 4.8 && keeper.position.distanceTo(ball.position) < 3.8) {
+      if (resolveGoalkeeperSave(pendingShot.plan.shooter.team)) return;
+    }
+  }
   const resolution = resolvePossessionSystem({
     players,
     homePlayers,
@@ -702,7 +785,11 @@ function resolvePossession() {
     activePlayer,
     ballOwner,
     ballPosition: ball.position,
-    random: rand
+    random: rand,
+    excludedPlayerIds: [
+      ...(releaseLock ? [releaseLock.playerId] : []),
+      ...(pendingShot ? players.filter((player) => player.role === "GK").map((player) => player.id) : [])
+    ]
   });
 
   if (!resolution) {
@@ -732,7 +819,7 @@ function resolvePossession() {
   if (resolution.feedText) {
     addFeed(resolution.feedText);
   }
-  if (resolution.shouldControlOwner) {
+  if (resolution.shouldControlOwner && !spectatorMode) {
     setActivePlayer(owner);
   }
 }
@@ -757,7 +844,7 @@ function getInputDirection() {
 
 function handleActions() {
   const actions = [...keyboardInput.consumeActions(), ...(touchInput?.consumeActions() ?? [])];
-  matchController.dispatch(actions);
+  matchController.dispatch(spectatorMode ? actions.filter((action) => ["switchCamera", "restart", "pause"].includes(action.type)) : actions);
 }
 
 function updateCamera(dt: number) {
@@ -830,6 +917,39 @@ function phase2DebugState() {
   };
 }
 
+function phase3DebugState() {
+  return {
+    ...footballAI.getDebugState(),
+    elapsed: matchState.elapsed,
+    spectator: spectatorMode,
+    debugEnabled: aiDebugToggle.checked,
+    difficultyConfig: getAIDifficulty(aiDifficulty),
+    keepers: [...keeperBrains.values()],
+    telemetry: matchTelemetry
+  };
+}
+
+function updateAIDebugPanel() {
+  aiDebugPanel.hidden = !aiDebugToggle.checked;
+  if (aiDebugPanel.hidden) return;
+  const debug = phase3DebugState();
+  const decisions = debug.decisions;
+  const focused = decisions.find((decision) => decision.playerId === ballOwner?.id) ?? decisions.find((decision) => decision.possession === "opponent") ?? decisions[0];
+  const teamLine = (team: TeamId) => {
+    const t = matchTelemetry[team];
+    return `${team.toUpperCase()}: passes ${t.completedPasses}/${t.passes} | shots ${t.shots} | goals ${t.goals}`;
+  };
+  const spatial = debug.spatial;
+  aiDebugPanel.textContent = [
+    `${aiDifficulty.toUpperCase()} · ${spectatorMode ? "AI vs AI" : "Player vs AI"} · possession ${ballOwner?.team ?? "loose"}`,
+    teamLine("home"), teamLine("away"),
+    spatial ? `Pressers H/A: ${spatial.home.presserCount}/${spatial.away.presserCount} · Shape H/A: ${spatial.home.shapeScore.toFixed(2)}/${spatial.away.shapeScore.toFixed(2)}` : "Waiting for AI decisions…",
+    focused ? `${focused.playerId} → ${focused.action.toUpperCase()} (${focused.status})\n${focused.reason}` : "",
+    ...decisions.filter((decision) => decision !== focused).slice(0, 4).map((decision) => `${decision.playerId}: ${decision.action} — ${decision.reason}`),
+    ...debug.keepers.map((keeper) => `${keeper.keeperId}: ${keeper.intentLabel}`)
+  ].join("\n");
+}
+
 function step() {
   const rawDt = Math.min(clock.getDelta(), 0.04);
   fixedTimestep.advance(rawDt, (fixedDt) => {
@@ -838,10 +958,14 @@ function step() {
     matchRules.updateClock(fixedDt);
     startMatchIfNeeded(matchState);
     handleActions();
-    if (matchState.status === "paused") return;
+    if (matchState.status === "paused" || matchState.status === "goal") return;
+    if (releaseLock) {
+      releaseLock.remaining -= dt;
+      if (releaseLock.remaining <= 0) releaseLock = null;
+    }
     const input = getInputDirection();
     const sprint = keyboardInput.getState().sprint || Boolean(touchInput?.getState().sprint);
-    updatePlayerMovement(activePlayer, input, sprint, dt);
+    if (!spectatorMode) updatePlayerMovement(activePlayer, input, sprint, dt);
     updateAI(dt);
     updateBall(dt);
     resolvePossession();
@@ -863,6 +987,7 @@ function updateRenderDebug() {
   }
   lastRenderDebugAt = now;
   const canvasSample = sampleCanvas();
+  updateAIDebugPanel();
   renderDebugEl.textContent = JSON.stringify({
     ...canvasSample,
     players: players.length,
@@ -871,6 +996,7 @@ function updateRenderDebug() {
     ballOwner: ballOwner?.short ?? "Loose",
     cameraMode: matchState.cameraMode,
     phase2: phase2DebugState(),
+    phase3: phase3DebugState(),
     stateHash: stateHash({ elapsed: matchState.elapsed, score: matchState.score, owner: matchState.ballOwnerId, active: matchState.activePlayerId, ball: ball.position.toArray(), velocity: ball.velocity.toArray() })
   });
   if (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000) {
@@ -890,12 +1016,44 @@ function separatePlayers() {
 function setupInput() {
   canvas.focus();
   keyboardInput.attach();
+  // Settings use native keyboard semantics. Detach gameplay listeners and
+  // discard held keys while a form control owns focus, preventing Space/Tab/R
+  // from pausing, switching player, or resetting while selecting difficulty.
+  aiSettings.addEventListener("focusin", () => {
+    keyboardInput.detach();
+    keyboardInput = new KeyboardInput();
+  });
+  aiSettings.addEventListener("focusout", () => {
+    queueMicrotask(() => {
+      if (!aiSettings.contains(document.activeElement)) keyboardInput.attach();
+    });
+  });
+  difficultySelect.addEventListener("change", () => {
+    aiDifficulty = difficultySelect.value as AIDifficultyLevel;
+    footballAI.setDifficulty(aiDifficulty);
+    goalkeeperSystem = new GoalkeeperSystem({
+      reactionBase: aiDifficulty === "easy" ? 0.57 : aiDifficulty === "hard" ? 0.32 : 0.42,
+      distributionHoldMin: aiDifficulty === "easy" ? 0.65 : aiDifficulty === "hard" ? 0.3 : 0.45,
+      distributionHoldMax: aiDifficulty === "easy" ? 1.65 : aiDifficulty === "hard" ? 0.95 : 1.35
+    });
+    keeperDistributions.clear();
+    addFeed(`AI difficulty: ${aiDifficulty}. Movement speed is unchanged.`);
+  });
+  aiDebugToggle.addEventListener("change", updateAIDebugPanel);
+  spectatorToggle.addEventListener("change", () => {
+    spectatorMode = spectatorToggle.checked;
+    footballAI.reset();
+    activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
+    addFeed(spectatorMode ? "Watching AI vs AI. Restart for a fresh comparison." : "Player control restored.");
+  });
+  aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch(false));
   canvas.addEventListener("pointerdown", (event) => {
     pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
     pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
     const found = homePlayers.find((player) => raycaster.intersectObject(player.body)[0]);
-    if (found) setActivePlayer(found);
+    if (found && !spectatorMode) setActivePlayer(found);
+    canvas.focus();
   });
   touchInput = new TouchInput(stickEl, document.querySelectorAll<HTMLElement>("[data-action]"));
   touchInput.attach();
@@ -947,7 +1105,8 @@ window.__eliteKickoffDebug = {
     clock: clockEl.textContent ?? "",
     ballOwner: ballOwner?.short ?? "Loose",
     cameraMode: matchState.cameraMode,
-    phase2: phase2DebugState()
+    phase2: phase2DebugState(),
+    phase3: phase3DebugState()
   })
 };
 resetMatch(false);
