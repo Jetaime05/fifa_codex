@@ -3,15 +3,10 @@ import {
   addMatchEvent,
   compactScoreText,
   createInitialMatchState,
-  isMatchClockExpired,
   isMatchEnded,
-  resetMatchState,
   scoreText,
   setActivePlayerId,
   setBallOwnerId,
-  setFullTime,
-  setMatchStatus,
-  startMatchIfNeeded,
   switchCameraMode
 } from "./core/match/MatchState";
 import type { CameraMode } from "./core/match/MatchState";
@@ -25,6 +20,10 @@ import { SeededRandom } from "./core/random";
 import { stateHash } from "./core/debug/stateHash";
 import { FixedTimestep } from "./core/simulation/FixedTimestep";
 import { MatchRuleSystem } from "./core/systems/MatchRuleSystem";
+import { MatchFlowSystem } from "./core/systems/MatchFlowSystem";
+import { MatchStatsSystem } from "./core/systems/MatchStatsSystem";
+import { createRestartPlan, positionRestart, resolveOutOfPlay, type RestartPlan } from "./core/systems/RestartSystem";
+import { RefereeSystem } from "./core/systems/RefereeSystem";
 import { CameraSystem } from "./core/systems/CameraSystem";
 import { FootballAISystem } from "./core/systems/AISystem";
 import { getAIDifficulty } from "./core/systems/AIDifficulty";
@@ -73,6 +72,7 @@ declare global {
         ballOwner: string;
         cameraMode: CameraMode;
         phase3: ReturnType<typeof phase3DebugState>;
+        phase4: ReturnType<typeof phase4DebugState>;
         phase2: {
           movement: { speed: number; maxSpeed: number; sprinting: boolean; stamina: number } | null;
           dribbling: { touchQuality: number; looseTouchRisk: number; looseTouch: boolean } | null;
@@ -139,6 +139,16 @@ app.innerHTML = `
         <label><input type="checkbox" data-ai-debug> AI debug</label>
         <label><input type="checkbox" data-ai-spectator> Watch AI vs AI</label>
         <button type="button" data-ai-restart>Restart</button>
+        <button type="button" data-match-pause>Pause / Resume</button>
+        <label>Next match <select data-match-length aria-label="Next match length"><option value="240" selected>4 min</option><option value="30">30s demo</option></select></label>
+        <details class="rules-options" data-rules-options>
+          <summary>Advanced rules</summary>
+          <label><input type="checkbox" data-rule="offside"> Offside</label>
+          <label><input type="checkbox" data-rule="advantage"> Advantage</label>
+          <label><input type="checkbox" data-rule="injuryTime"> Added time</label>
+          <label><input type="checkbox" data-rule="substitutions"> Substitution windows</label>
+          <small data-substitution-status>Advanced rules are optional.</small>
+        </details>
       </div>
       <pre class="ai-debug-panel" data-ai-debug-panel hidden aria-label="AI decision details"></pre>
       <div class="player-panel">
@@ -176,6 +186,7 @@ app.innerHTML = `
         <div class="result-box">
           <h1 class="result-title">Full Time</h1>
           <p class="result-score" data-result-score>Real Madrid 0 - 0 Man City</p>
+          <div data-result-stats aria-label="Match statistics"></div>
           <button class="restart" data-restart>Restart Match</button>
         </div>
       </div>
@@ -205,6 +216,8 @@ const difficultySelect = document.querySelector<HTMLSelectElement>("[data-ai-dif
 const aiDebugToggle = document.querySelector<HTMLInputElement>("[data-ai-debug]")!;
 const spectatorToggle = document.querySelector<HTMLInputElement>("[data-ai-spectator]")!;
 const aiDebugPanel = document.querySelector<HTMLPreElement>("[data-ai-debug-panel]")!;
+const matchLengthSelect = document.querySelector<HTMLSelectElement>("[data-match-length]")!;
+const resultStatsEl = document.querySelector<HTMLDivElement>("[data-result-stats]")!;
 const hudController = new HudController({ score: scoreEl, clock: clockEl, camera: cameraChip, possession: possessionChip, playerName: playerNameEl, playerRole: playerRoleEl, playerStatus: playerStatusEl, stamina: staminaEl });
 const minimapController = new MinimapController(minimapEl, { halfWidth: HALF_W, halfLength: HALF_L });
 
@@ -223,6 +236,12 @@ let lastTouch: Player | null = null;
 let attackingTeam: TeamId = "home";
 const matchState = createInitialMatchState(MATCH_DURATION);
 const matchRules = new MatchRuleSystem(matchState);
+const matchFlow = new MatchFlowSystem(matchState);
+const matchStats = new MatchStatsSystem();
+const referee = new RefereeSystem({ bounds: { halfWidth: HALF_W, halfLength: HALF_L }, random: () => rand(0, 1) });
+let pendingRestart: RestartPlan | null = null;
+let restartPlacement: ReturnType<typeof positionRestart> | null = null;
+let nextKickoffTeam: TeamId = "home";
 const fixedTimestep = new FixedTimestep({ step: 1 / 60, maxSteps: 8 });
 const movementConfig = DEFAULT_MOVEMENT_CONFIG;
 const dribblingSystem = new DribblingSystem();
@@ -233,9 +252,6 @@ let aiDifficulty: AIDifficultyLevel = "normal";
 let spectatorMode = false;
 const keeperBrains = new Map<string, KeeperBrainSnapshot>();
 const keeperDistributions = new Map<string, { choice: KeeperDistributionChoice; remaining: number }>();
-type TeamMatchTelemetry = { passes: number; completedPasses: number; shots: number; goals: number; clearances: number };
-const emptyTeamTelemetry = (): TeamMatchTelemetry => ({ passes: 0, completedPasses: 0, shots: 0, goals: 0, clearances: 0 });
-let matchTelemetry = { home: emptyTeamTelemetry(), away: emptyTeamTelemetry() };
 let pendingPass: { passerId: string; team: TeamId; targetId: string } | null = null;
 let releaseLock: { playerId: string; remaining: number } | null = null;
 const cameraSystem = new CameraSystem();
@@ -251,7 +267,6 @@ let pendingShot: { plan: ShotPlan; defendingTeam: TeamId; keeperAttempted?: bool
 let lastCameraEmphasis = 0;
 let lastRenderDebugAt = 0;
 let lastFrameCaptureAt = 0;
-let goalResetTimer: ReturnType<typeof setTimeout> | null = null;
 let keyboardInput = new KeyboardInput();
 let touchInput: TouchInput | undefined;
 const matchController = new MatchController({
@@ -265,8 +280,8 @@ const matchController = new MatchController({
     addMatchEvent(matchState, "camera", `Camera switched to ${nextCameraMode}.`);
     addFeed(`Camera switched to ${nextCameraMode}.`);
   },
-  restart: () => resetMatch(false),
-  pause: () => setMatchStatus(matchState, matchState.status === "paused" ? "playing" : "paused")
+  restart: () => resetMatch(),
+  pause: () => matchState.status === "paused" ? matchFlow.resume() : matchFlow.pause()
 });
 
 const ball = {
@@ -310,16 +325,14 @@ function setupPlayers() {
   activePlayer.marker.scale.setScalar(1.16);
 }
 
-function resetMatch(keepScore = false) {
-  if (goalResetTimer) { clearTimeout(goalResetTimer); goalResetTimer = null; }
+function resetMatch() {
   cameraSystem.clearGoalEmphasis();
-  if (!keepScore) {
-    resetMatchState(matchState);
-    matchTelemetry = { home: emptyTeamTelemetry(), away: emptyTeamTelemetry() };
-    matchOverEl.classList.remove("visible");
-  } else {
-    setMatchStatus(matchState, "playing");
-  }
+  matchState.duration = Number(matchLengthSelect.value);
+  matchFlow.reset();
+  matchStats.reset();
+  referee.reset();
+  feedEl.replaceChildren();
+  matchOverEl.classList.remove("visible");
 
   [...homePlayers, ...awayPlayers].forEach((player) => {
     player.position.copy(player.home);
@@ -328,8 +341,11 @@ function resetMatch(keepScore = false) {
     player.mesh.rotation.y = player.team === "home" ? 0 : Math.PI;
     player.hasBall = false;
     player.cooldown = 0;
-    player.stamina = keepScore ? Math.min(1, player.stamina + 0.18) : 1;
-    player.marker.material.opacity = player === activePlayer ? 0.92 : 0;
+    player.stamina = 1;
+    player.intent = player.role === "GK" ? "keeper" : "hold";
+    player.mesh.visible = true;
+    player.marker.material.opacity = 0;
+    player.marker.scale.setScalar(1);
   });
 
   activePlayer = homePlayers.find((p) => p.short === "Vini Jr.") ?? homePlayers[8];
@@ -358,9 +374,57 @@ function resetMatch(keepScore = false) {
   lastCameraEmphasis = 0;
   actionChip.textContent = "Ready";
   matchRules.resetGoalLock();
+  nextKickoffTeam = "home";
+  prepareRestart(createRestartPlan({ kind: "kickoff", team: nextKickoffTeam, bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS }), false);
   addMatchEvent(matchState, "restart", "Kickoff at the Bernabeu-inspired arena.");
   addFeed("Kickoff at the Bernabeu-inspired arena.");
   updateHud();
+}
+
+function eligiblePlayers() {
+  return players.filter((player) => !referee.dismissedIds.has(player.id));
+}
+
+function teamPlayers(team: TeamId) {
+  return eligiblePlayers().filter((player) => player.team === team);
+}
+
+function prepareRestart(plan: RestartPlan, startCountdown = true) {
+  releaseBall();
+  pendingPass = null;
+  pendingShot = null;
+  releaseLock = null;
+  referee.clearPending();
+  footballAI.reset();
+  keeperDistributions.clear();
+  pendingRestart = plan;
+  restartPlacement = positionRestart({ restart: plan, players: eligiblePlayers(), bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS });
+  ball.position.copy(restartPlacement.ballPosition);
+  ball.mesh.position.copy(ball.position);
+  ball.velocity.set(0, 0, 0);
+  ball.spin.set(0, 0, 0);
+  lastTouch = null;
+  if (restartPlacement.taker?.team === "home") setActivePlayer(restartPlacement.taker as Player);
+  if (startCountdown) {
+    matchFlow.beginRestart();
+    const stat = plan.kind === "corner" ? "corners" : plan.kind === "throwIn" ? "throwIns" : plan.kind === "goalKick" ? "goalKicks" : null;
+    if (stat) matchStats.record(plan.team, stat);
+    cameraSystem.goalEmphasis(ball.position.clone());
+  } else matchRules.resetGoalLock();
+  addFeed(`${plan.kind}: ${plan.team === "home" ? "Real Madrid" : "Man City"}. ${plan.reason}`);
+}
+
+function executeRestart() {
+  const plan = pendingRestart;
+  const placement = restartPlacement;
+  pendingRestart = null;
+  restartPlacement = null;
+  if (!plan || !placement?.taker) return;
+  const taker = placement.taker as Player;
+  if (!attachBallTo(taker)) return;
+  if (plan.kind === "penalty" || (plan.kind === "freeKick" && !plan.reason.toLowerCase().includes("offside") && ball.position.z * (plan.team === "home" ? 1 : -1) > HALF_L - 26)) shootBall(taker);
+  else if (placement.receiver) passBall(taker, placement.receiver as Player, plan.kind);
+  else clearBall(taker);
 }
 
 function setActivePlayer(player: Player) {
@@ -384,10 +448,13 @@ function addFeed(text: string) {
 }
 
 function attachBallTo(player: Player) {
+  if (referee.dismissedIds.has(player.id)) return false;
+  const offside = referee.onTouch(player);
+  if (offside) { prepareRestart(offside); return false; }
   pendingShot = null;
   if (pendingPass) {
     if (player.team === pendingPass.team && player.id !== pendingPass.passerId) {
-      matchTelemetry[player.team].completedPasses += 1;
+      matchStats.record(player.team, "completedPasses");
     }
     pendingPass = null;
   }
@@ -403,6 +470,7 @@ function attachBallTo(player: Player) {
   ball.velocity.set(0, 0, 0);
   ball.spin.set(0, 0, 0);
   addMatchEvent(matchState, "possession", `${player.short} takes possession.`);
+  return true;
 }
 
 function releaseBall() {
@@ -422,25 +490,8 @@ function playerForward(player: SimPlayer) {
   return forward;
 }
 
-function findNearestPlayer(team: TeamId, position: THREE.Vector3, includeKeeper = true) {
-  const list = team === "home" ? homePlayers : awayPlayers;
-  let closest = list[0];
-  let best = Number.POSITIVE_INFINITY;
-  for (const p of list) {
-    if (!includeKeeper && p.role === "GK") {
-      continue;
-    }
-    const d = p.position.distanceToSquared(position);
-    if (d < best) {
-      closest = p;
-      best = d;
-    }
-  }
-  return closest;
-}
-
 function switchToNearestHome() {
-  const candidates = homePlayers.filter((p) => p.role !== "GK");
+  const candidates = teamPlayers("home").filter((p) => p.role !== "GK");
   let best = candidates[0];
   let bestScore = Number.POSITIVE_INFINITY;
   for (const player of candidates) {
@@ -451,15 +502,15 @@ function switchToNearestHome() {
       bestScore = distance + penalty;
     }
   }
-  setActivePlayer(best);
+  if (best) setActivePlayer(best);
 }
 
-function passBall(player: Player, intendedTarget?: Player) {
-  if (ballOwner !== player) {
+function passBall(player: Player, intendedTarget?: Player, restartKind?: string) {
+  if (matchState.status !== "playing" || ballOwner !== player) {
     return;
   }
-  const teammates = (player.team === "home" ? homePlayers : awayPlayers).filter((p) => p !== player);
-  const opponents = player.team === "home" ? awayPlayers : homePlayers;
+  const teammates = teamPlayers(player.team).filter((p) => p !== player);
+  const opponents = teamPlayers(player.team === "home" ? "away" : "home");
   const plan = executePass({
     passer: player,
     teammates,
@@ -472,10 +523,11 @@ function passBall(player: Player, intendedTarget?: Player) {
   if (!plan) {
     return;
   }
+  referee.snapshotPass({ passer: player, players: eligiblePlayers(), ballPosition: plan.origin, restartKind });
   releaseBall();
   releaseLock = { playerId: player.id, remaining: 0.22 };
   pendingPass = { passerId: player.id, team: player.team, targetId: plan.target.id };
-  matchTelemetry[player.team].passes += 1;
+  matchStats.record(player.team, "passes");
   pendingShot = null;
   lastPassPlan = plan;
   lastFeedback = plan.feedback;
@@ -487,11 +539,11 @@ function passBall(player: Player, intendedTarget?: Player) {
 }
 
 function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
-  if (ballOwner !== player) {
+  if (matchState.status !== "playing" || ballOwner !== player) {
     return;
   }
   const defendingTeam: TeamId = player.team === "home" ? "away" : "home";
-  const opponents = player.team === "home" ? awayPlayers : homePlayers;
+  const opponents = teamPlayers(defendingTeam);
   const goalkeeper = opponents.find((candidate) => candidate.role === "GK") ?? null;
   const targetZ = player.team === "home" ? HALF_L + 1.4 : -HALF_L - 1.4;
   const plan = executeShot({
@@ -513,7 +565,7 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
   releaseBall();
   releaseLock = { playerId: player.id, remaining: 0.22 };
   pendingPass = null;
-  matchTelemetry[player.team].shots += 1;
+  matchStats.record(player.team, "shots");
   lastShotPlan = plan;
   pendingShot = { plan, defendingTeam };
   lastFeedback = plan.feedback;
@@ -523,21 +575,41 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
 }
 
 function tackle(player: Player) {
-  const opponents = player.team === "home" ? awayPlayers : homePlayers;
-  const owner = ballOwner;
-  const target = owner && owner.team !== player.team ? owner : findNearestPlayer(opponents[0].team, player.position, true);
+  if (matchState.status !== "playing" || referee.dismissedIds.has(player.id)) return;
+  const target = ballOwner;
+  if (!target || target.team === player.team || player.cooldown > 0) return;
   const dist = target.position.distanceTo(player.position);
   if (dist < 3.2) {
     const success = player.stats.defending + player.stats.physical * 0.4 + rand(0, 35);
     const resistance = target.stats.dribbling + target.stats.physical * 0.28 + rand(0, 35);
+    player.cooldown = 0.65;
+    const assessment = referee.assessTackle({ offender: player, victim: target, wonBall: success > resistance,
+      fromBehind: player.position.clone().sub(target.position).dot(playerForward(target)) < -0.5,
+      relativeSpeed: player.velocity.clone().sub(target.velocity).length(), possessionTeam: target.team });
+    if (assessment.foul) {
+      matchStats.record(player.team, "fouls");
+      if (assessment.card === "yellow" || assessment.card === "secondYellow") matchStats.record(player.team, "yellowCards");
+      if (assessment.card === "red" || assessment.card === "secondYellow") matchStats.record(player.team, "redCards");
+      if (referee.dismissedIds.has(player.id)) {
+        player.mesh.visible = false;
+        player.velocity.set(0, 0, 0);
+        if (player === activePlayer) switchToNearestHome();
+      }
+      addFeed(`${player.short}: ${assessment.reason}${assessment.card ? ` (${assessment.card})` : ""}`);
+      if (assessment.restart) prepareRestart(assessment.restart);
+      else if (assessment.advantage) actionChip.textContent = "Advantage — play on";
+      return;
+    }
     if (success > resistance) {
-      attachBallTo(player);
+      if (!attachBallTo(player)) return;
+      matchStats.record(player.team, "tackles");
       addMatchEvent(matchState, "tackle", `${player.short} wins the tackle.`);
       addFeed(`${player.short} wins the tackle.`);
     } else if (ballOwner === target) {
       const knock = target.position.clone().sub(player.position).normalize().multiplyScalar(9);
       releaseBall();
       pendingShot = null;
+      lastTouch = player;
       ball.velocity.copy(knock);
       ball.spin.set(0, 0, 0);
       addMatchEvent(matchState, "tackle", `${player.short} pokes it loose.`);
@@ -547,7 +619,7 @@ function tackle(player: Player) {
 }
 
 function nearestOpponentDistance(player: Player) {
-  const opponents = player.team === "home" ? awayPlayers : homePlayers;
+  const opponents = teamPlayers(player.team === "home" ? "away" : "home");
   let best = Number.POSITIVE_INFINITY;
   for (const opponent of opponents) {
     best = Math.min(best, opponent.position.distanceTo(player.position));
@@ -577,8 +649,10 @@ function updatePlayerMovement(player: Player, inputDirection: THREE.Vector3, spr
 }
 
 function updateAI(dt: number) {
+  const dismissedCount = referee.dismissedIds.size;
   footballAI.update({
-    players,
+    players: eligiblePlayers(),
+    shouldContinue: () => matchState.status === "playing" && referee.dismissedIds.size === dismissedCount,
     goalkeepersManagedExternally: true,
     ball,
     ballOwner,
@@ -593,11 +667,11 @@ function updateAI(dt: number) {
     onClear: (player) => clearBall(player as Player),
     onTackle: (player) => tackle(player as Player)
   });
-  updateGoalkeepers(dt);
+  if (matchState.status === "playing") updateGoalkeepers(dt);
 }
 
 function clearBall(player: Player) {
-  if (ballOwner !== player) return;
+  if (matchState.status !== "playing" || ballOwner !== player) return;
   const direction = player.team === "home" ? 1 : -1;
   const target = player.position.clone().add(new THREE.Vector3(rand(-14, 14), 2.5, direction * 34));
   releaseBall();
@@ -606,14 +680,14 @@ function clearBall(player: Player) {
   pendingShot = null;
   kickBall(ball, target, 30, 2.8);
   lastFeedback = null;
-  matchTelemetry[player.team].clearances += 1;
+  matchStats.record(player.team, "clearances");
   actionChip.textContent = "Clearance into space";
   addMatchEvent(matchState, "pass", `${player.short} clears under pressure.`);
   addFeed(`${player.short} clears into space.`);
 }
 
 function updateGoalkeepers(dt: number) {
-  for (const keeper of [...homePlayers, ...awayPlayers].filter((player) => player.role === "GK")) {
+  for (const keeper of eligiblePlayers().filter((player) => player.role === "GK")) {
     const positioning = goalkeeperSystem.getPositioning({ keeper, ball, bounds: { halfWidth: HALF_W, halfLength: HALF_L } });
     goalkeeperSystem.updateMovement({
       keeper,
@@ -630,8 +704,8 @@ function updateGoalkeepers(dt: number) {
       continue;
     }
 
-    const teammates = keeper.team === "home" ? homePlayers : awayPlayers;
-    const opponents = keeper.team === "home" ? awayPlayers : homePlayers;
+    const teammates = teamPlayers(keeper.team);
+    const opponents = teamPlayers(keeper.team === "home" ? "away" : "home");
     let distributionState = keeperDistributions.get(keeper.id);
     if (!distributionState) {
       const choice = goalkeeperSystem.chooseDistribution(keeper, teammates, opponents);
@@ -655,6 +729,7 @@ function updateGoalkeepers(dt: number) {
 }
 
 function updateBall(dt: number) {
+  const previousPosition = ball.position.clone();
   const owner = ballOwner;
   if (owner) {
     lastDribblingResult = dribblingSystem.update({
@@ -676,6 +751,14 @@ function updateBall(dt: number) {
     }
   }
 
+  if (owner) {
+    const crossing = resolveOutOfPlay({ previousPosition, position: ball.position, bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS, goalWidth: GOAL_WIDTH, lastTouchTeam: owner.team });
+    if (crossing) {
+      if (crossing.kind === "goal") scoreGoal(crossing.team);
+      else prepareRestart(crossing.restart);
+      return;
+    }
+  }
   // Dribbling owns the attached-ball position. Running BallSystem's owner
   // branch afterwards would overwrite its stat-scaled touch point, so physics
   // is only advanced once the ball is loose.
@@ -691,12 +774,15 @@ function updateBall(dt: number) {
       ballRadius: BALL_RADIUS,
       goalWidth: GOAL_WIDTH,
       playerForward,
-      onGoal: scoreGoal
+      onGoal: scoreGoal,
+      onOutOfPlay: prepareRestart,
+      lastTouchTeam: lastTouch?.team
     });
   }
 }
 
 function scoreGoal(team: TeamId) {
+  if (matchState.status !== "playing") return;
   if (pendingShot && pendingShot.plan.shooter.team !== team) {
     pendingShot = null;
   }
@@ -705,14 +791,16 @@ function scoreGoal(team: TeamId) {
   }
   const scorer = lastTouch?.team === team ? lastTouch.short : team === "home" ? "Real Madrid" : "Manchester City";
   if (!matchRules.scoreGoal(team, () => `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`)) return;
-  matchTelemetry[team].goals += 1;
+  matchStats.record(team, "goals");
+  referee.onGoal();
+  nextKickoffTeam = team === "home" ? "away" : "home";
+  matchFlow.beginGoal();
   pendingPass = null;
   const goalText = matchState.events[0]?.description ?? `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`;
   pendingShot = null;
   cameraSystem.goalEmphasis(ball.position.clone());
   addFeed(goalText);
   updateHud();
-  goalResetTimer = setTimeout(() => { goalResetTimer = null; resetMatch(true); }, 900);
 }
 
 function resolveGoalkeeperSave(scoringTeam: TeamId) {
@@ -720,7 +808,7 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   if (!pending || pending.keeperAttempted || pending.plan.shooter.team !== scoringTeam) {
     return false;
   }
-  const keeper = (pending.defendingTeam === "home" ? homePlayers : awayPlayers)
+  const keeper = teamPlayers(pending.defendingTeam)
     .find((player) => player.role === "GK");
   if (!keeper) {
     pendingShot = null;
@@ -749,6 +837,8 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   }
   pendingShot = null;
 
+  matchStats.record(keeper.team, "saves");
+  lastTouch = keeper;
   const awayFromGoal = pending.defendingTeam === "home" ? 1 : -1;
   ball.position.copy(keeper.position).add(new THREE.Vector3(0, BALL_RADIUS, awayFromGoal * 0.8));
   ball.mesh.position.copy(ball.position);
@@ -773,15 +863,15 @@ function resolvePossession() {
   // Incoming shots use the keeper's reaction/save model once, never the
   // generic loose-ball claim. A beaten keeper cannot re-roll at the goal line.
   if (pendingShot) {
-    const keeper = players.find((player) => player.role === "GK" && player.team === pendingShot?.defendingTeam);
+    const keeper = eligiblePlayers().find((player) => player.role === "GK" && player.team === pendingShot?.defendingTeam);
     if (keeper && ball.position.y < 4.8 && keeper.position.distanceTo(ball.position) < 3.8) {
       if (resolveGoalkeeperSave(pendingShot.plan.shooter.team)) return;
     }
   }
   const resolution = resolvePossessionSystem({
-    players,
-    homePlayers,
-    awayPlayers,
+    players: eligiblePlayers(),
+    homePlayers: teamPlayers("home"),
+    awayPlayers: teamPlayers("away"),
     activePlayer,
     ballOwner,
     ballPosition: ball.position,
@@ -797,6 +887,10 @@ function resolvePossession() {
   }
 
   const owner = resolution.owner as Player;
+  const offside = referee.onTouch(owner);
+  if (offside) { prepareRestart(offside); return; }
+  lastTouch = owner;
+  if (pendingPass && owner.team !== pendingPass.team) pendingPass = null;
   if (!ballOwner) {
     lastFirstTouchResult = firstTouchSystem.update({
       player: owner,
@@ -815,7 +909,7 @@ function resolvePossession() {
   }
 
   pendingShot = null;
-  attachBallTo(owner);
+  if (!attachBallTo(owner)) return;
   if (resolution.feedText) {
     addFeed(resolution.feedText);
   }
@@ -858,16 +952,36 @@ function isFinesseShotRequested() {
 
 function updateHud() {
   hudController.update(matchState, activePlayer, ballOwner);
+  const countdown = Math.ceil(matchFlow.debugSnapshot.countdownSeconds);
+  if (matchState.status !== "playing") possessionChip.textContent = matchState.status === "kickoff" ? `Kickoff in ${countdown}`
+    : matchState.status === "restart" ? `${pendingRestart?.kind ?? "Restart"} in ${countdown}`
+    : matchState.status === "halftime" ? `Half time · ${countdown}s` : matchState.status === "paused" ? "Paused" : matchState.status === "goal" ? "GOAL!" : "Full time";
+  const phase = matchState.status === "restart" || matchState.status === "goal" || matchState.status === "kickoff" ? "deadBall" : matchState.status;
+  aiSettings.querySelector<HTMLElement>("[data-substitution-status]")!.textContent = referee.options.substitutions
+    ? `Substitution window: ${referee.canSubstitute(phase) ? "OPEN (placeholder)" : "closed"}` : "Advanced rules are optional.";
 }
 
 function updateMinimap() {
-  minimapController.update(players, ball, activePlayer);
+  minimapController.update(eligiblePlayers(), ball, activePlayer);
 }
 
 function endMatch() {
-  setFullTime(matchState);
   addMatchEvent(matchState, "fullTime", "Full time.");
   resultScoreEl.textContent = `Real Madrid ${scoreText(matchState)} Man City`;
+  const stats = matchStats.snapshot;
+  const rows = [
+    ["Shots", stats.home.shots, stats.away.shots],
+    ["Passes completed", `${stats.home.completedPasses}/${stats.home.passes}`, `${stats.away.completedPasses}/${stats.away.passes}`],
+    ["Possession", `${Math.round(stats.home.possessionPercent)}%`, `${Math.round(stats.away.possessionPercent)}%`],
+    ["Tackles won", stats.home.tackles, stats.away.tackles],
+    ["Saves", stats.home.saves, stats.away.saves],
+    ["Fouls", stats.home.fouls, stats.away.fouls],
+    ["Yellow / red", `${stats.home.yellowCards} / ${stats.home.redCards}`, `${stats.away.yellowCards} / ${stats.away.redCards}`],
+    ["Corners", stats.home.corners, stats.away.corners],
+    ["Throw-ins", stats.home.throwIns, stats.away.throwIns],
+    ["Goal kicks", stats.home.goalKicks, stats.away.goalKicks]
+  ];
+  resultStatsEl.innerHTML = `<table><thead><tr><th>Match stats</th><th>Real</th><th>City</th></tr></thead><tbody>${rows.map(([label, home, away]) => `<tr><th>${label}</th><td>${home}</td><td>${away}</td></tr>`).join("")}</tbody></table>`;
   matchOverEl.classList.add("visible");
   addFeed("Full time.");
 }
@@ -925,18 +1039,31 @@ function phase3DebugState() {
     debugEnabled: aiDebugToggle.checked,
     difficultyConfig: getAIDifficulty(aiDifficulty),
     keepers: [...keeperBrains.values()],
-    telemetry: matchTelemetry
+    telemetry: matchStats.snapshot
   };
 }
 
+function phase4DebugState() {
+  return { flow: matchFlow.debugSnapshot, referee: referee.debugSnapshot(),
+    restart: pendingRestart ? { ...pendingRestart, position: pendingRestart.position.toArray(), taker: restartPlacement?.taker?.id } : null,
+    stats: matchStats.snapshot, eligiblePlayers: { home: teamPlayers("home").length, away: teamPlayers("away").length },
+    ballPosition: ball.position.toArray(), lastTouch: lastTouch?.id ?? null };
+}
+
 function updateAIDebugPanel() {
+  const playerTop = document.querySelector<HTMLElement>(".player-panel")!.getBoundingClientRect().top;
+  const settingsTop = aiSettings.getBoundingClientRect().top;
+  aiSettings.style.maxHeight = `${Math.max(64, playerTop - settingsTop - (aiDebugToggle.checked ? 80 : 12))}px`;
   aiDebugPanel.hidden = !aiDebugToggle.checked;
   if (aiDebugPanel.hidden) return;
+  const panelTop = aiSettings.getBoundingClientRect().bottom + 10;
+  aiDebugPanel.style.top = `${panelTop}px`;
+  aiDebugPanel.style.maxHeight = `${Math.max(20, playerTop - panelTop - 10)}px`;
   const debug = phase3DebugState();
   const decisions = debug.decisions;
   const focused = decisions.find((decision) => decision.playerId === ballOwner?.id) ?? decisions.find((decision) => decision.possession === "opponent") ?? decisions[0];
   const teamLine = (team: TeamId) => {
-    const t = matchTelemetry[team];
+    const t = matchStats.snapshot[team];
     return `${team.toUpperCase()}: passes ${t.completedPasses}/${t.passes} | shots ${t.shots} | goals ${t.goals}`;
   };
   const spatial = debug.spatial;
@@ -954,26 +1081,42 @@ function step() {
   const rawDt = Math.min(clock.getDelta(), 0.04);
   fixedTimestep.advance(rawDt, (fixedDt) => {
     const dt = fixedDt * GAME_SPEED;
-    if (isMatchEnded(matchState)) return;
-    matchRules.updateClock(fixedDt);
-    startMatchIfNeeded(matchState);
     handleActions();
-    if (matchState.status === "paused" || matchState.status === "goal") return;
+    if (matchState.status === "restart" || matchState.status === "goal" || (matchState.status === "kickoff" && matchFlow.debugSnapshot.kickoffReason === "goal")) {
+      referee.recordStoppage(fixedDt);
+      matchFlow.addStoppageTime(referee.consumeStoppageSeconds());
+    }
+    for (const event of matchFlow.update(fixedDt)) {
+      if (event.type === "halftime") { nextKickoffTeam = "away"; referee.clearPending(); addFeed("Half time. Ends remain unchanged in this prototype."); }
+      if (event.type === "kickoffSetup") prepareRestart(createRestartPlan({ kind: "kickoff", team: nextKickoffTeam, bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS }), false);
+      if (event.type === "kickoffReady" || event.type === "restartReady") executeRestart();
+      if (event.type === "fullTime") endMatch();
+    }
+    if (matchState.status !== "playing") return;
+    const recalled = referee.update(fixedDt, ballOwner?.team ?? null);
+    if (recalled) { prepareRestart(recalled); return; }
     if (releaseLock) {
       releaseLock.remaining -= dt;
       if (releaseLock.remaining <= 0) releaseLock = null;
     }
     const input = getInputDirection();
     const sprint = keyboardInput.getState().sprint || Boolean(touchInput?.getState().sprint);
-    if (!spectatorMode) updatePlayerMovement(activePlayer, input, sprint, dt);
+    if (!spectatorMode && !referee.dismissedIds.has(activePlayer.id)) {
+      activePlayer.cooldown = Math.max(0, activePlayer.cooldown - dt);
+      updatePlayerMovement(activePlayer, input, sprint, dt);
+    }
     updateAI(dt);
+    if (matchState.status !== "playing") return;
     updateBall(dt);
+    if (matchState.status !== "playing") return;
     resolvePossession();
+    if (matchState.status !== "playing") return;
     separatePlayers();
-    if (isMatchClockExpired(matchState)) endMatch();
+    matchStats.addPossession(ballOwner?.team ?? null, fixedDt);
   });
   updateCamera(rawDt);
-  if (!isMatchEnded(matchState)) { updateHud(); updateMinimap(); }
+  updateHud();
+  if (!isMatchEnded(matchState)) updateMinimap();
 
   renderer.render(scene, camera);
   updateRenderDebug();
@@ -997,6 +1140,7 @@ function updateRenderDebug() {
     cameraMode: matchState.cameraMode,
     phase2: phase2DebugState(),
     phase3: phase3DebugState(),
+    phase4: phase4DebugState(),
     stateHash: stateHash({ elapsed: matchState.elapsed, score: matchState.score, owner: matchState.ballOwnerId, active: matchState.activePlayerId, ball: ball.position.toArray(), velocity: ball.velocity.toArray() })
   });
   if (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000) {
@@ -1007,7 +1151,7 @@ function updateRenderDebug() {
 
 function separatePlayers() {
   separatePlayerCollisions({
-    players,
+    players: eligiblePlayers(),
     activePlayer,
     playerRadius: PLAYER_RADIUS
   });
@@ -1046,18 +1190,26 @@ function setupInput() {
     activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
     addFeed(spectatorMode ? "Watching AI vs AI. Restart for a fresh comparison." : "Player control restored.");
   });
-  aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch(false));
+  aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch());
+  aiSettings.querySelector<HTMLButtonElement>("[data-match-pause]")!.addEventListener("click", () => {
+    if (matchState.status === "paused") matchFlow.resume(); else matchFlow.pause();
+  });
+  aiSettings.querySelectorAll<HTMLInputElement>("[data-rule]").forEach((input) => input.addEventListener("change", () => {
+    referee.setOptions({ [input.dataset.rule!]: input.checked });
+    matchFlow.setStoppageTimeEnabled(referee.options.injuryTime);
+  }));
+  aiSettings.querySelector("details")!.addEventListener("toggle", updateAIDebugPanel);
   canvas.addEventListener("pointerdown", (event) => {
     pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
     pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
-    const found = homePlayers.find((player) => raycaster.intersectObject(player.body)[0]);
+    const found = teamPlayers("home").find((player) => raycaster.intersectObject(player.body)[0]);
     if (found && !spectatorMode) setActivePlayer(found);
     canvas.focus();
   });
   touchInput = new TouchInput(stickEl, document.querySelectorAll<HTMLElement>("[data-action]"));
   touchInput.attach();
-  restartButton.addEventListener("click", () => resetMatch(false));
+  restartButton.addEventListener("click", () => resetMatch());
 }
 
 function sampleCanvas() {
@@ -1106,8 +1258,9 @@ window.__eliteKickoffDebug = {
     ballOwner: ballOwner?.short ?? "Loose",
     cameraMode: matchState.cameraMode,
     phase2: phase2DebugState(),
-    phase3: phase3DebugState()
+    phase3: phase3DebugState(),
+    phase4: phase4DebugState()
   })
 };
-resetMatch(false);
+resetMatch();
 step();

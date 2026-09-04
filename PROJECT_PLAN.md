@@ -1540,6 +1540,8 @@ Out of Scope:
 
 ### Phase 4 - Complete Football Rules
 
+Implementation status (2026-09-04): Phase 4A–4D prototype scope implemented and PM-reviewed. `npm.cmd test` passes 168 tests across 31 files; `npm.cmd run build` passes. See `artifacts/phase4/QA.md` for evidence, reproduction steps and explicit prototype limitations. Half-time keeps the same ends, restarts release automatically, and substitution windows are eligibility placeholders rather than a bench-management feature. Recorded demo clips remain a presentation follow-up.
+
 Goal:
 
 Make the match complete.

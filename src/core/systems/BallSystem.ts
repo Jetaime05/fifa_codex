@@ -2,6 +2,8 @@ import * as THREE from "three";
 import type { TeamId } from "../../data/types";
 import type { FieldBounds, SimBall, SimPlayer } from "./types";
 import { isGoalCrossed, isInsideGoalMouth } from "./MatchRuleSystem";
+import { resolveOutOfPlay } from "./RestartSystem";
+import type { AttackingDirections, RestartPlan } from "./RestartSystem";
 
 type BallPhysicsInput = {
   ball: SimBall;
@@ -12,6 +14,10 @@ type BallPhysicsInput = {
   goalWidth: number;
   playerForward: (player: SimPlayer) => THREE.Vector3;
   onGoal: (team: TeamId) => void;
+  /** Opt into Phase 4 boundaries. Omitting this retains the legacy rebound game. */
+  onOutOfPlay?: (restart: RestartPlan) => void;
+  lastTouchTeam?: TeamId | null;
+  attackingDirections?: AttackingDirections;
 };
 
 export type BallKickOptions = {
@@ -32,8 +38,21 @@ export function updateBallPhysics({
   ballRadius,
   goalWidth,
   playerForward,
-  onGoal
+  onGoal,
+  onOutOfPlay,
+  lastTouchTeam,
+  attackingDirections
 }: BallPhysicsInput) {
+  const previousPosition = ball.position.clone();
+  const checkBoundary = () => {
+    if (!onOutOfPlay) return false;
+    const result = resolveOutOfPlay({ previousPosition, position: ball.position, bounds, ballRadius, goalWidth, lastTouchTeam: ballOwner?.team ?? lastTouchTeam, attackingDirections });
+    if (!result) return false;
+    ball.mesh.position.copy(ball.position);
+    if (result.kind === "goal") onGoal(result.team);
+    else onOutOfPlay(result.restart);
+    return true;
+  };
   if (ballOwner) {
     const forward = playerForward(ballOwner);
     const foot = ballOwner.position.clone().add(forward.multiplyScalar(1.05));
@@ -41,6 +60,7 @@ export function updateBallPhysics({
     ball.position.lerp(foot, clamp(dt * 18, 0, 1));
     if (ball.spin) ball.spin.multiplyScalar(Math.pow(0.08, dt));
     ball.mesh.position.copy(ball.position);
+    checkBoundary();
     return;
   }
 
@@ -77,12 +97,14 @@ export function updateBallPhysics({
     ball.velocity.z *= air;
   }
 
-  if (Math.abs(ball.position.x) > bounds.halfWidth - ballRadius) {
+  if (checkBoundary()) return;
+
+  if (!onOutOfPlay && Math.abs(ball.position.x) > bounds.halfWidth - ballRadius) {
     ball.position.x = Math.sign(ball.position.x) * (bounds.halfWidth - ballRadius);
     ball.velocity.x *= -0.52;
   }
 
-  if (Math.abs(ball.position.z) > bounds.halfLength - ballRadius) {
+  if (!onOutOfPlay && Math.abs(ball.position.z) > bounds.halfLength - ballRadius) {
     if (isGoalCrossed(ball.position.z, ball.position.x, ball.position.y, bounds.halfLength, goalWidth)) {
       onGoal(ball.position.z > 0 ? "home" : "away");
       return;

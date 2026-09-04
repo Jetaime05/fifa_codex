@@ -4,6 +4,7 @@ import { addGoal, advanceMatchClock, createInitialMatchState, switchCameraMode }
 describe("MatchState", () => {
   it("increments match clock and clamps to duration", () => {
     const state = createInitialMatchState(10);
+    state.status = "playing";
     advanceMatchClock(state, 2.5); advanceMatchClock(state, 20);
     expect(state.elapsed).toBe(10);
   });

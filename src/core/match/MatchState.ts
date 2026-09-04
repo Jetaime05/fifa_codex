@@ -2,7 +2,7 @@ import type { TeamId } from "../../data/types";
 
 export type CameraMode = "broadcast" | "follow";
 
-export type MatchStatus = "kickoff" | "playing" | "paused" | "goal" | "fullTime";
+export type MatchStatus = "kickoff" | "playing" | "paused" | "goal" | "halftime" | "restart" | "fullTime";
 
 export type MatchEventType =
   | "goal"
@@ -12,6 +12,10 @@ export type MatchEventType =
   | "possession"
   | "camera"
   | "restart"
+  | "halftime"
+  | "foul"
+  | "card"
+  | "offside"
   | "fullTime";
 
 export type MatchEvent = {
@@ -23,6 +27,8 @@ export type MatchEvent = {
 export type MatchState = {
   duration: number;
   elapsed: number;
+  /** Awarded extra playing seconds, not wall-clock time spent at stoppages. */
+  stoppageTime: number;
   score: Record<TeamId, number>;
   status: MatchStatus;
   activePlayerId: string | null;
@@ -35,6 +41,7 @@ export function createInitialMatchState(duration: number): MatchState {
   return {
     duration,
     elapsed: 0,
+    stoppageTime: 0,
     score: {
       home: 0,
       away: 0
@@ -49,6 +56,7 @@ export function createInitialMatchState(duration: number): MatchState {
 
 export function resetMatchState(state: MatchState) {
   state.elapsed = 0;
+  state.stoppageTime = 0;
   state.score.home = 0;
   state.score.away = 0;
   state.status = "kickoff";
@@ -69,20 +77,20 @@ export function startMatchIfNeeded(state: MatchState) {
 }
 
 export function advanceMatchClock(state: MatchState, deltaSeconds: number) {
-  if (deltaSeconds <= 0 || state.status === "paused" || state.status === "goal" || state.status === "fullTime") {
+  if (!Number.isFinite(deltaSeconds) || deltaSeconds <= 0 || state.status !== "playing") {
     return state.elapsed;
   }
 
-  state.elapsed = Math.min(state.duration, state.elapsed + deltaSeconds);
+  state.elapsed = Math.min(state.duration + state.stoppageTime, state.elapsed + deltaSeconds);
   return state.elapsed;
 }
 
 export function isMatchClockExpired(state: MatchState) {
-  return state.elapsed >= state.duration;
+  return state.elapsed >= state.duration + state.stoppageTime;
 }
 
 export function setFullTime(state: MatchState) {
-  state.elapsed = state.duration;
+  state.elapsed = state.duration + state.stoppageTime;
   state.status = "fullTime";
 }
 
@@ -117,7 +125,7 @@ export function compactScoreText(state: MatchState) {
 }
 
 export function clockText(state: MatchState) {
-  const displayTime = Math.min(state.duration, state.elapsed);
+  const displayTime = Math.min(state.duration + state.stoppageTime, state.elapsed);
   const mins = Math.floor(displayTime / 60);
   const secs = Math.floor(displayTime % 60);
   return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;

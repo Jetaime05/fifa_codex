@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { applyBallTrajectory, kickBall, updateBallPhysics } from "./BallSystem";
-import type { SimBall } from "./types";
+import type { SimBall, SimPlayer } from "./types";
+import type { RestartPlan } from "./RestartSystem";
 
 const makeBall = (): SimBall => ({
   position: new THREE.Vector3(0, 0.55, 0),
@@ -67,5 +68,49 @@ describe("BallSystem trajectory compatibility", () => {
     expect(scored).toBe(false);
     expect(ball.position.z).toBeCloseTo(55.45);
     expect(ball.velocity.z).toBeLessThan(0);
+  });
+
+  it("opts into out-of-play without rebounding and reports the last-touch opponent", () => {
+    const ball = makeBall();
+    ball.position.x = 36.4;
+    ball.velocity.x = 20;
+    const restarts: RestartPlan[] = [];
+    updateBallPhysics({ ball, ballOwner: null, dt: 1 / 60,
+      bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+      playerForward: () => new THREE.Vector3(0, 0, 1), onGoal: () => undefined,
+      lastTouchTeam: "away", onOutOfPlay: (restart) => restarts.push(restart) });
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0]).toMatchObject({ kind: "throwIn", team: "home" });
+    expect(ball.velocity.x).toBeGreaterThan(0);
+    expect(ball.position.x).toBeGreaterThan(36.55);
+  });
+
+  it("detects a carried ball leaving the pitch and attributes the carrier's last touch", () => {
+    const ball = makeBall();
+    ball.position.x = 36.4;
+    const owner = { team: "home", position: new THREE.Vector3(36, 0, 0) } as SimPlayer;
+    const restarts: RestartPlan[] = [];
+    updateBallPhysics({ ball, ballOwner: owner, dt: 1 / 60,
+      bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+      playerForward: () => new THREE.Vector3(1, 0, 0), onGoal: () => undefined,
+      lastTouchTeam: "away", onOutOfPlay: (restart) => restarts.push(restart) });
+    expect(restarts[0]).toMatchObject({ kind: "throwIn", team: "away" });
+  });
+
+  it("lets the caller freeze play after a boundary callback without duplicate restart", () => {
+    const ball = makeBall();
+    ball.position.set(12, 0.55, 56.4);
+    ball.velocity.z = 20;
+    let paused = false;
+    let count = 0;
+    for (let i = 0; i < 10; i++) {
+      if (paused) continue;
+      updateBallPhysics({ ball, ballOwner: null, dt: 1 / 60,
+        bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+        playerForward: () => new THREE.Vector3(0, 0, 1), onGoal: () => undefined,
+        lastTouchTeam: "home", onOutOfPlay: () => { paused = true; count++; } });
+    }
+    expect(paused).toBe(true);
+    expect(count).toBe(1);
   });
 });

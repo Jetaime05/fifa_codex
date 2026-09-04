@@ -16,6 +16,8 @@ export type AIContext = {
   goalkeeperConfig?: Partial<GoalkeeperConfig>;
   /** Dedicated keeper brain owns keeper movement/distribution when true. */
   goalkeepersManagedExternally?: boolean;
+  /** Stop a captured update when a callback starts a restart or changes player eligibility. */
+  shouldContinue?: () => boolean;
   onPass?: (player: SimPlayer, target?: SimPlayer) => void;
   onShoot?: (player: SimPlayer) => void;
   onClear?: (player: SimPlayer) => void;
@@ -67,6 +69,7 @@ export class FootballAISystem {
   }
 
   update(context: AIContext): void {
+    if (context.shouldContinue?.() === false) return;
     const { players, ball, ballOwner, activePlayer, teams, bounds } = context;
     const dt = Math.max(0, context.dt);
     if (dt === 0) return;
@@ -100,6 +103,7 @@ export class FootballAISystem {
     this.spatial = { home: plans.home.metrics, away: plans.away.metrics };
     let actionDispatched = false;
     for (const player of players) {
+      if (context.shouldContinue?.() === false) return;
       if (player.id === activePlayer?.id || (player.role === "GK" && context.goalkeepersManagedExternally)) continue;
       player.cooldown = Math.max(0, player.cooldown - dt);
       const spatial = plans[player.team].decisions.find((d) => d.playerId === player.id)!;
@@ -109,7 +113,9 @@ export class FootballAISystem {
       if (player.role === "GK") {
         target = getGoalkeeperTargetPosition({ keeper: player, ball, bounds, config: context.goalkeeperConfig });
         if (ballOwner === player && player.cooldown <= 0 && !actionDispatched && context.onPass) {
-          context.onPass(player); player.cooldown = 1.2; this.actionCounts.pass++; actionDispatched = true;
+          context.onPass(player);
+          if (context.shouldContinue?.() === false) return;
+          player.cooldown = 1.2; this.actionCounts.pass++; actionDispatched = true;
         }
       } else {
         const opponents = players.filter((p) => p.team !== player.team);
@@ -162,19 +168,33 @@ export class FootballAISystem {
             if (ballOwner === player && player.cooldown <= 0) {
               if (action === "pass" && context.onPass) {
                 const receiver = teammates.find((p) => p.id === memory.passTargetId);
-                if (receiver && !analyzePassingLane(player.position, receiver.position, opponents).blocked) { context.onPass(player, receiver); executed = true; }
-              } else if (action === "shoot" && context.onShoot) { context.onShoot(player); executed = true; }
-              else if (action === "clear" && context.onClear) { context.onClear(player); executed = true; }
+                if (receiver && !analyzePassingLane(player.position, receiver.position, opponents).blocked) {
+                  context.onPass(player, receiver);
+                  if (context.shouldContinue?.() === false) return;
+                  executed = true;
+                }
+              } else if (action === "shoot" && context.onShoot) {
+                context.onShoot(player);
+                if (context.shouldContinue?.() === false) return;
+                executed = true;
+              } else if (action === "clear" && context.onClear) {
+                context.onClear(player);
+                if (context.shouldContinue?.() === false) return;
+                executed = true;
+              }
               if (executed) player.cooldown = Math.max(player.cooldown, decision.cooldownMs / 1000);
             }
             if (action === "press" && spatial.reason === "press" && ballOwner && ballOwner.team !== player.team && player.cooldown <= 0 && player.position.distanceTo(ballOwner.position) < 2.7 && context.onTackle) {
-              context.onTackle(player); player.cooldown = Math.max(0.6, decision.cooldownMs / 1000); executed = true;
+              context.onTackle(player);
+              if (context.shouldContinue?.() === false) return;
+              player.cooldown = Math.max(0.6, decision.cooldownMs / 1000); executed = true;
             }
             if (executed || !needsCallback || action === "press") this.actionCounts[action]++;
             actionDispatched ||= executed;
           }
         }
       }
+      if (context.shouldContinue?.() === false) return;
       const movement = target.clone().sub(player.position);
       updatePlayerMovement({ player, inputDirection: movement.length() > 0.8 ? movement : new THREE.Vector3(), sprint, dt, bounds, playerRadius: context.playerRadius, isControlled: false, hasBall: ballOwner === player });
     }

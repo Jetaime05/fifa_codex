@@ -14,6 +14,46 @@ function context(players: SimPlayer[], owner: SimPlayer | null): AIContext {
 const step = (system: FootballAISystem, ctx: AIContext, count: number) => { for (let i = 0; i < count; i++) system.update(ctx); };
 
 describe("FootballAISystem runtime", () => {
+  it("does not mutate a stopped match or continue moving stale players after a referee restart", () => {
+    const defender = player("defender", "home", 0, -1, "DEF");
+    const carrier = player("carrier", "away", 0, 0);
+    const cover = player("cover", "home", 10, -15, "DEF");
+    const ctx = context([defender, carrier, cover], carrier);
+    ctx.activePlayer = carrier;
+    const system = new FootballAISystem("hard");
+    let playing = true;
+    ctx.shouldContinue = () => playing;
+    const resetPositions = [new THREE.Vector3(-20, 0, -20), new THREE.Vector3(5, 0, 5), new THREE.Vector3(20, 0, -20)];
+    ctx.onTackle = vi.fn(() => {
+      playing = false;
+      ctx.players.forEach((p, index) => { p.position.copy(resetPositions[index]); p.velocity.set(0, 0, 0); p.cooldown = 0; });
+      system.reset();
+    });
+    step(system, ctx, 12);
+    expect(ctx.onTackle).toHaveBeenCalledTimes(1);
+    ctx.players.forEach((p, index) => {
+      expect(p.position.equals(resetPositions[index])).toBe(true);
+      expect(p.velocity.length()).toBe(0);
+      expect(p.cooldown).toBe(0);
+    });
+    expect(system.getDebugState()).toMatchObject({ nowMs: 0, decisions: [], actionCounts: { press: 0 } });
+  });
+
+  it("aborts immediately after goalkeeper callback changes eligibility", () => {
+    const keeper = player("keeper", "home", 0, -48, "GK");
+    const teammate = player("teammate", "home", 12, -20);
+    const ctx = context([keeper, teammate], keeper);
+    let eligible = true;
+    ctx.shouldContinue = () => eligible;
+    ctx.onPass = vi.fn(() => { eligible = false; });
+    const positions = ctx.players.map(p => p.position.clone());
+    const system = new FootballAISystem();
+    system.update(ctx);
+    expect(ctx.onPass).toHaveBeenCalledOnce();
+    expect(keeper.cooldown).toBe(0);
+    ctx.players.forEach((p, index) => expect(p.position.equals(positions[index])).toBe(true));
+  });
+
   it("reacts before making a contextual shot and executes only once per decision", () => {
     const striker = player("striker", "home", 0, 47);
     const ctx = context([striker, player("defender", "away", 20, 15)], striker);
