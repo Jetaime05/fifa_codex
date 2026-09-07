@@ -7,6 +7,14 @@ import {
   type TeamShapeConfig,
   type TeamShapePlan
 } from "./TeamShapeSystem";
+import {
+  getPlayerInstruction,
+  getTacticalPresserLimit,
+  getTacticalModifiers,
+  resolveTeamTactics,
+  type RuntimeTeamTactics,
+  type RuntimeTeamTacticsByTeam
+} from "./TacticsSystem";
 import type { FieldBounds, SimPlayer, SimPlayerIntent } from "./types";
 
 export type SpatialAIConfig = {
@@ -30,6 +38,8 @@ export type SpatialPlayerDecision = {
 export type SpatialAIMetrics = {
   phase: TeamPhase;
   presserCount: number;
+  /** Effective configured intensity, useful to the debug/management layer. */
+  pressingIntensity?: number;
   supportOptionCount: number;
   openSupportOptionCount: number;
   shapeScore: number;
@@ -51,6 +61,8 @@ export const DEFAULT_SPATIAL_AI_CONFIG: Readonly<SpatialAIConfig> = {
   shape: {},
   passingLane: {}
 };
+
+type SpatialTacticsInput = RuntimeTeamTactics | RuntimeTeamTacticsByTeam;
 
 const mean = (values: number[]) => values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
 
@@ -92,6 +104,8 @@ export function planTeamSpatialAI(args: {
     shape?: Partial<TeamShapeConfig>;
     passingLane?: Partial<PassingLaneConfig>;
   };
+  /** A single team value or a home/away map from the tactics editor. */
+  tactics?: SpatialTacticsInput;
 }): SpatialAIPlan {
   const config: SpatialAIConfig = {
     ...DEFAULT_SPATIAL_AI_CONFIG,
@@ -102,12 +116,23 @@ export function planTeamSpatialAI(args: {
   const teammates = args.players.filter((player) => player.team === args.team.id);
   const opponents = args.players.filter((player) => player.team !== args.team.id);
   const phase: TeamPhase = args.ballOwner?.team === args.team.id ? "attacking" : "defending";
+  const tactics = resolveTeamTactics(args.tactics, args.team.id);
+  const tacticalModifiers = tactics ? getTacticalModifiers(tactics) : undefined;
   const pressureTarget = args.ballOwner?.team !== args.team.id && args.ballOwner ? args.ballOwner.position : args.ballPosition;
+  // Without tactics, retain the Phase 3 max-two behavior exactly. A tactics
+  // value scales both the candidate radius and count, but never exceeds that
+  // old cap (or an explicitly lower config cap).
+  const maxPressers = tactics
+    ? getTacticalPresserLimit(tactics, config.maxPressers)
+    : Math.max(0, config.maxPressers);
+  const pressingDistance = tactics
+    ? config.pressingDistance * tacticalModifiers!.pressureDistanceMultiplier
+    : config.pressingDistance;
   const pressers = phase === "defending"
     ? teammates
-      .filter((player) => player.role !== "GK" && player.position.distanceTo(pressureTarget) <= config.pressingDistance)
+      .filter((player) => player.role !== "GK" && player.position.distanceTo(pressureTarget) <= pressingDistance)
       .sort((a, b) => a.position.distanceToSquared(pressureTarget) - b.position.distanceToSquared(pressureTarget) || a.id.localeCompare(b.id))
-      .slice(0, Math.max(0, config.maxPressers))
+      .slice(0, maxPressers)
     : [];
   const presserIds = new Set(pressers.map((player) => player.id));
   const shape = buildTeamShapePlan({
@@ -119,7 +144,8 @@ export function planTeamSpatialAI(args: {
     ballOwner: args.ballOwner,
     bounds: args.bounds,
     excludedMarkerIds: [...presserIds],
-    config: config.shape
+    config: config.shape,
+    tactics
   });
   const targetByPlayer = new Map(shape.targets.map((target) => [target.playerId, target]));
   const decisions = teammates
@@ -127,18 +153,49 @@ export function planTeamSpatialAI(args: {
       if (player.role === "GK") return { playerId: player.id, target: player.home.clone(), intent: "keeper", sprint: false, reason: "keeper" };
       if (player === args.ballOwner) {
         const target = player.position.clone();
-        target.z += args.team.attackingDirection * 10;
+        // Build-up and passing style influence the carrier's next support/pass
+        // target, never the player's physical max speed.
+        const carryDistance = tactics
+          ? THREE.MathUtils.clamp(10 * tacticalModifiers!.supportForwardMultiplier, 5, 18)
+          : 10;
+        target.z += args.team.attackingDirection * carryDistance;
         return { playerId: player.id, target, intent: "support", sprint: true, reason: "carry" };
       }
       if (presserIds.has(player.id)) return { playerId: player.id, target: pressureTarget.clone(), intent: "chase", sprint: true, reason: "press" };
       const shapeTarget = targetByPlayer.get(player.id)!;
       const reason = shapeTarget.source;
-      const intent: SimPlayerIntent = reason === "support" ? "support" : "return";
-      return { playerId: player.id, target: shapeTarget.position.clone(), intent, sprint: reason === "support", reason };
+      const instruction = getPlayerInstruction(tactics, player);
+      const intent: SimPlayerIntent = reason === "support" || instruction === "getForward" || instruction === "freeRoam" ? "support" : "return";
+      return {
+        playerId: player.id,
+        target: shapeTarget.position.clone(),
+        intent,
+        sprint: reason === "support" || instruction === "getForward",
+        reason
+      };
     })
     .sort((a, b) => a.playerId.localeCompare(b.playerId));
-  const supportOptions = args.ballOwner?.team === args.team.id
-    ? findOpenPassingOptions(args.ballOwner, teammates, opponents, args.team.attackingDirection, config.passingLane)
+  const passingLaneConfig = tactics
+    ? {
+      ...config.passingLane,
+      minPassDistance: Math.max(2, (config.passingLane.minPassDistance ?? 3) * tacticalModifiers!.passDistanceMultiplier),
+      maxPassDistance: Math.max(8, (config.passingLane.maxPassDistance ?? 35) * tacticalModifiers!.passDistanceMultiplier)
+    }
+    : config.passingLane;
+  // Tactics rank the intended shape outlets without mutating simulation
+  // players. This gives build-up/passing style a deterministic effect on pass
+  // targets while preserving the legacy path when no tactics are supplied.
+  const passingTeammates = tactics
+    ? teammates.map((player) => {
+      const shaped = targetByPlayer.get(player.id);
+      return shaped ? { ...player, position: shaped.position.clone() } : player;
+    })
+    : teammates;
+  const passingCarrier = tactics && args.ballOwner
+    ? { ...args.ballOwner, position: args.ballOwner.position.clone() }
+    : args.ballOwner;
+  const supportOptions = args.ballOwner?.team === args.team.id && passingCarrier
+    ? findOpenPassingOptions(passingCarrier, passingTeammates, opponents, args.team.attackingDirection, passingLaneConfig)
     : [];
   const recognition = measureShapeRecognition(teammates, shape, args.team.attackingDirection, args.bounds);
   return {
@@ -148,6 +205,7 @@ export function planTeamSpatialAI(args: {
     metrics: {
       phase,
       presserCount: pressers.length,
+      ...(tactics ? { pressingIntensity: tactics.pressingIntensity } : {}),
       supportOptionCount: supportOptions.length,
       openSupportOptionCount: supportOptions.filter((option) => !option.lane.blocked).length,
       shapeScore: recognition.score,
@@ -165,6 +223,7 @@ export function planBothTeamsSpatialAI(args: {
   teams: Record<TeamId, TeamData>;
   bounds: FieldBounds;
   config?: Parameters<typeof planTeamSpatialAI>[0]["config"];
+  tactics?: SpatialTacticsInput;
 }): Record<TeamId, SpatialAIPlan> {
   return {
     home: planTeamSpatialAI({ ...args, team: args.teams.home }),

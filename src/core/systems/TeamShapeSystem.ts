@@ -1,6 +1,15 @@
 import * as THREE from "three";
 import type { TeamData, TeamId } from "../../data/types";
 import type { FieldBounds, SimPlayer } from "./types";
+import {
+  getPlayerInstruction,
+  getTacticalModifiers,
+  getTacticalTargetOverride,
+  resolveTeamTactics,
+  type RuntimePlayerInstruction,
+  type RuntimeTeamTactics,
+  type RuntimeTeamTacticsByTeam
+} from "./TacticsSystem";
 
 export type TeamPhase = "attacking" | "defending";
 
@@ -22,6 +31,8 @@ export type TeamShapeTarget = {
   playerId: string;
   position: THREE.Vector3;
   source: "shape" | "support" | "mark";
+  /** Present when a runtime instruction, rather than the base shape, guides the target. */
+  instruction?: RuntimePlayerInstruction;
 };
 
 export type MarkingAssignment = {
@@ -68,11 +79,14 @@ export function calculateBaseShapeTargets(args: {
   ballPosition: THREE.Vector3;
   bounds: FieldBounds;
   config?: Partial<TeamShapeConfig>;
+  tactics?: RuntimeTeamTactics | RuntimeTeamTacticsByTeam;
 }): TeamShapeTarget[] {
   const { players, team, phase, ballPosition, bounds } = args;
   const config = { ...DEFAULT_TEAM_SHAPE_CONFIG, ...args.config };
+  const tactics = resolveTeamTactics(args.tactics, team.id);
+  const tacticalModifiers = tactics ? getTacticalModifiers(tactics) : undefined;
   const attacking = phase === "attacking";
-  const width = attacking ? config.attackingWidth : config.defensiveWidth;
+  const width = (attacking ? config.attackingWidth : config.defensiveWidth) * (tacticalModifiers?.widthMultiplier ?? 1);
   const shift = ballPosition.x * (attacking ? config.attackingBallShift : config.defensiveBallShift);
   return players
     .map((player): TeamShapeTarget => {
@@ -81,8 +95,30 @@ export function calculateBaseShapeTargets(args: {
         ? config.attackingAdvance * roleAdvance[player.role] * team.attackingDirection
         : -config.defensiveDrop * team.attackingDirection;
       const blockShift = THREE.MathUtils.clamp(ballPosition.z * 0.2, -9, 9);
-      const target = new THREE.Vector3(player.home.x * width + shift, 0, player.home.z + advance + blockShift);
-      return { playerId: player.id, position: clampTarget(target, bounds), source: "shape" };
+      const target = new THREE.Vector3(
+        player.home.x * width + shift,
+        0,
+        player.home.z + advance + blockShift + (tacticalModifiers?.lineDepthShift ?? 0) * team.attackingDirection
+      );
+      const instruction = tactics ? getPlayerInstruction(tactics, player) : "balanced";
+      const overridden = tactics
+        ? getTacticalTargetOverride({
+          target,
+          playerId: player.id,
+          short: player.short,
+          number: player.number,
+          role: player.role,
+          homeX: player.home.x,
+          attackingDirection: team.attackingDirection,
+          tactics
+        })
+        : target;
+      return {
+        playerId: player.id,
+        position: clampTarget(overridden, bounds),
+        source: "shape",
+        ...(tactics && instruction !== "balanced" ? { instruction } : {})
+      };
     })
     .sort((a, b) => a.playerId.localeCompare(b.playerId));
 }
@@ -95,15 +131,25 @@ export function applySupportRuns(args: {
   team: TeamData;
   bounds: FieldBounds;
   config?: Partial<TeamShapeConfig>;
+  tactics?: RuntimeTeamTactics | RuntimeTeamTacticsByTeam;
 }): { targets: TeamShapeTarget[]; supportRunnerIds: string[] } {
   const { players, ballOwner, team, bounds } = args;
   const config = { ...DEFAULT_TEAM_SHAPE_CONFIG, ...args.config };
+  const tactics = resolveTeamTactics(args.tactics, team.id);
+  const tacticalModifiers = tactics ? getTacticalModifiers(tactics) : undefined;
+  const supportRunForward = config.supportRunForward * (tacticalModifiers?.supportForwardMultiplier ?? 1);
+  const supportRunLateral = config.supportRunLateral * (tacticalModifiers?.supportLateralMultiplier ?? 1);
   const candidates = players
     .filter((player) => player.id !== ballOwner.id && player.role !== "GK" && player.role !== "DEF")
+    .filter((player) => getPlayerInstruction(tactics, player) !== "stayBack")
     .sort((a, b) => {
+      const instructionA = getPlayerInstruction(tactics, a);
+      const instructionB = getPlayerInstruction(tactics, b);
+      const getForwardA = instructionA === "getForward" ? 0 : 1;
+      const getForwardB = instructionB === "getForward" ? 0 : 1;
       const roleA = a.role === "FWD" ? 0 : 1;
       const roleB = b.role === "FWD" ? 0 : 1;
-      return roleA - roleB || a.position.distanceToSquared(ballOwner.position) - b.position.distanceToSquared(ballOwner.position) || a.id.localeCompare(b.id);
+      return getForwardA - getForwardB || roleA - roleB || a.position.distanceToSquared(ballOwner.position) - b.position.distanceToSquared(ballOwner.position) || a.id.localeCompare(b.id);
     })
     .slice(0, config.supportRunnerCount);
   const runnerIds = new Set(candidates.map((player) => player.id));
@@ -114,18 +160,24 @@ export function applySupportRuns(args: {
     const side = player.home.x === 0 ? (player.id.localeCompare(ballOwner.id) < 0 ? -1 : 1) : Math.sign(player.home.x);
     const position = shapeTarget.position.clone();
     const carrierProgress = ballOwner.position.z * team.attackingDirection;
-    const anchorProgress = position.z * team.attackingDirection + config.supportRunForward;
+    const anchorProgress = position.z * team.attackingDirection + supportRunForward;
     // Two progressive outlets and a trailing reset option form a triangle as
     // the attack travels, rather than leaving all runners at fixed anchors.
     const supportProgress = runnerIndex === 2
-      ? carrierProgress - config.supportRunForward
-      : THREE.MathUtils.clamp(anchorProgress, carrierProgress + config.supportRunForward, carrierProgress + 22);
+      ? carrierProgress - supportRunForward
+      : THREE.MathUtils.clamp(anchorProgress, carrierProgress + supportRunForward, carrierProgress + 22 * (tacticalModifiers?.supportForwardMultiplier ?? 1));
     position.z = supportProgress * team.attackingDirection;
-    position.x += side * config.supportRunLateral;
-    if (Math.abs(position.x - ballOwner.position.x) < config.supportRunLateral + 2) {
-      position.x = ballOwner.position.x + side * (config.supportRunLateral + 3);
+    position.x += side * supportRunLateral;
+    if (Math.abs(position.x - ballOwner.position.x) < supportRunLateral + 2) {
+      position.x = ballOwner.position.x + side * (supportRunLateral + 3);
     }
-    return { playerId: player.id, position: clampTarget(position, bounds), source: "support" };
+    const instruction = getPlayerInstruction(tactics, player);
+    return {
+      playerId: player.id,
+      position: clampTarget(position, bounds),
+      source: "support",
+      ...(tactics && instruction !== "balanced" ? { instruction } : {})
+    };
   });
   return { targets, supportRunnerIds: candidates.map((player) => player.id) };
 }
@@ -139,6 +191,7 @@ export function assignDefensiveMarkingZones(args: {
   bounds: FieldBounds;
   excludedPlayerIds?: readonly string[];
   config?: Partial<TeamShapeConfig>;
+  tactics?: RuntimeTeamTactics | RuntimeTeamTacticsByTeam;
 }): { targets: TeamShapeTarget[]; assignments: MarkingAssignment[] } {
   const config = { ...DEFAULT_TEAM_SHAPE_CONFIG, ...args.config };
   const excluded = new Set(args.excludedPlayerIds ?? []);
@@ -165,7 +218,7 @@ export function assignDefensiveMarkingZones(args: {
     targets: args.targets.map((shapeTarget): TeamShapeTarget => {
       const assignment = byMarker.get(shapeTarget.playerId);
       return assignment
-        ? { playerId: shapeTarget.playerId, position: assignment.target.clone(), source: "mark" }
+        ? { playerId: shapeTarget.playerId, position: assignment.target.clone(), source: "mark", ...(shapeTarget.instruction ? { instruction: shapeTarget.instruction } : {}) }
         : { ...shapeTarget, position: shapeTarget.position.clone() };
     }),
     assignments
@@ -182,6 +235,7 @@ export function buildTeamShapePlan(args: {
   bounds: FieldBounds;
   excludedMarkerIds?: readonly string[];
   config?: Partial<TeamShapeConfig>;
+  tactics?: RuntimeTeamTactics | RuntimeTeamTacticsByTeam;
 }): TeamShapePlan {
   let targets = calculateBaseShapeTargets(args);
   let supportRunnerIds: string[] = [];
@@ -195,7 +249,8 @@ export function buildTeamShapePlan(args: {
       // cover an off-ball threat, not become an uncounted third presser.
       opponents: args.opponents.filter((opponent) => opponent.id !== args.ballOwner?.id),
       targets,
-      excludedPlayerIds: args.excludedMarkerIds
+      excludedPlayerIds: args.excludedMarkerIds,
+      tactics: args.tactics
     }));
   }
   return { team: args.team.id, phase: args.phase, targets, supportRunnerIds, markingAssignments };

@@ -55,4 +55,20 @@ describe("SpatialAISystem", () => {
       .toEqual(second.home.decisions.map((decision) => [decision.playerId, decision.reason, decision.target.x, decision.target.z]));
     expect(first.away.metrics.presserCount).toBeLessThanOrEqual(2);
   });
+
+  it("scales pressure slots with tactics while retaining the two-player cap", () => {
+    const home = homeShape();
+    const owner = player("a-owner", "away", "FWD", 0, -8);
+    const low = planTeamSpatialAI({
+      players: [...home, owner], ballPosition: owner.position, ballOwner: owner, team: teams.home, bounds,
+      tactics: { defensiveLine: 50, pressingIntensity: 0, buildUpSpeed: 50, passingStyle: "balanced", attackWidth: 50, instructions: {} }
+    });
+    const high = planTeamSpatialAI({
+      players: [...home, owner], ballPosition: owner.position, ballOwner: owner, team: teams.home, bounds,
+      tactics: { defensiveLine: 50, pressingIntensity: 100, buildUpSpeed: 50, passingStyle: "balanced", attackWidth: 50, instructions: {} }
+    });
+    expect(low.metrics.presserCount).toBe(0);
+    expect(high.metrics.presserCount).toBe(2);
+    expect(high.metrics.presserCount).toBeLessThanOrEqual(2);
+  });
 });

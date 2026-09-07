@@ -60,15 +60,17 @@ export function resolveOutOfPlay({ previousPosition, position, bounds, ballRadiu
 }
 
 /** Arrange only the eligible players supplied by the caller. Does not alter formation homes. */
-export function positionRestart({ restart, players, bounds, ballRadius = 0.55, attackingDirections = defaultDirections }: {
+export function positionRestart({ restart, players, bounds, ballRadius = 0.55, attackingDirections = defaultDirections, preferredTakerId }: {
   restart: RestartPlan; players: SimPlayer[]; bounds: FieldBounds; ballRadius?: number; attackingDirections?: AttackingDirections;
+  preferredTakerId?: string;
 }) {
   const direction = attackingDirections[restart.team];
   const ballPosition = restart.position.clone();
   ballPosition.y = ballRadius;
   const teammates = players.filter((player) => player.team === restart.team);
   const preferred = teammates.filter((player) => restart.kind === "goalKick" ? player.role === "GK" : player.role !== "GK");
-  const taker = [...(preferred.length ? preferred : teammates)].sort((a, b) => a.position.distanceToSquared(ballPosition) - b.position.distanceToSquared(ballPosition) || a.id.localeCompare(b.id))[0] ?? null;
+  const preferredTaker = teammates.find((player) => player.id === preferredTakerId);
+  const taker = preferredTaker ?? [...(preferred.length ? preferred : teammates)].sort((a, b) => a.position.distanceToSquared(ballPosition) - b.position.distanceToSquared(ballPosition) || a.id.localeCompare(b.id))[0] ?? null;
   const receiver = restart.kind === "penalty" ? null : teammates.filter((player) => player !== taker && player.role !== "GK").sort((a, b) => a.position.distanceToSquared(ballPosition) - b.position.distanceToSquared(ballPosition) || a.id.localeCompare(b.id))[0] ?? null;
   const target = ballPosition.clone();
   if (restart.kind === "penalty") target.set(0, ballRadius, direction * (bounds.halfLength + 1));

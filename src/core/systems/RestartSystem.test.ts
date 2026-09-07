@@ -65,6 +65,17 @@ describe("Restart positioning", () => {
     expect(positionRestart({ restart, players: [player("opponent", "away")], bounds }).taker).toBeNull();
     expect(positionRestart({ restart, players: [player("eligible", "home")], bounds }).taker?.id).toBe("eligible");
   });
+  it("honors an eligible configured set-piece taker and falls back safely", () => {
+    const restart = createRestartPlan({ kind: "corner", team: "home", bounds });
+    const players = [player("near", "home"), player("captain", "home"), player("opponent", "away")];
+    players[0].position.copy(restart.position);
+    players[1].position.set(0, 0, 0);
+    expect(positionRestart({ restart, players, bounds, preferredTakerId: "captain" }).taker?.id).toBe("captain");
+    const fallbackPlayers = [player("near", "home"), player("captain", "home"), player("opponent", "away")];
+    fallbackPlayers[0].position.copy(restart.position);
+    fallbackPlayers[1].position.set(0, 0, 0);
+    expect(positionRestart({ restart, players: fallbackPlayers, bounds, preferredTakerId: "missing" }).taker?.id).toBe("near");
+  });
   it("puts kickoff opponents in their own half outside the centre circle", () => {
     const restart = createRestartPlan({ kind: "kickoff", team: "away", bounds });
     const players = [player("taker", "away"), player("receiver", "away"), player("opponent", "home")];

@@ -26,6 +26,7 @@ import { createRestartPlan, positionRestart, resolveOutOfPlay, type RestartPlan 
 import { RefereeSystem } from "./core/systems/RefereeSystem";
 import { CameraSystem } from "./core/systems/CameraSystem";
 import { FootballAISystem } from "./core/systems/AISystem";
+import type { RuntimeTeamTactics } from "./core/systems/TacticsSystem";
 import { getAIDifficulty } from "./core/systems/AIDifficulty";
 import type { AIDifficultyLevel } from "./core/systems/AIDifficulty";
 import { DribblingSystem } from "./core/systems/DribblingSystem";
@@ -49,7 +50,10 @@ import { PlayerAnimationSystem } from "./rendering/PlayerPresentation";
 import { MatchAudio, type MatchAudioCue } from "./audio/MatchAudio";
 import { manCity, realMadrid } from "./data/teams";
 import type { PlayerData, TeamData, TeamId } from "./data/types";
+import { buildMatchTeamData, chemistry, createSquadStore, homeSquadCards, teamOverall, validateSquad } from "./management/SquadSystem";
+import { SquadUI } from "./management/SquadUI";
 import "./styles.css";
+import "./management/SquadUI.css";
 
 type Player = PlayerData &
   SimPlayer & {
@@ -76,6 +80,7 @@ declare global {
         phase3: ReturnType<typeof phase3DebugState>;
         phase4: ReturnType<typeof phase4DebugState>;
         phase5: ReturnType<typeof phase5DebugState>;
+        phase6: ReturnType<typeof phase6DebugState>;
         phase2: {
           movement: { speed: number; maxSpeed: number; sprinting: boolean; stamina: number } | null;
           dribbling: { touchQuality: number; looseTouchRisk: number; looseTouch: boolean } | null;
@@ -155,6 +160,7 @@ app.innerHTML = `
         <label><input type="checkbox" data-ai-spectator> Watch AI vs AI</label>
         <button type="button" data-ai-restart>Restart</button>
         <button type="button" data-match-pause>Pause / Resume</button>
+        <button type="button" data-squad-open>Squad Hub</button>
         <label>Next match <select data-match-length aria-label="Next match length"><option value="240" selected>4 min</option><option value="30">30s demo</option></select></label>
         <details class="rules-options" data-rules-options>
           <summary>Advanced rules</summary>
@@ -205,6 +211,7 @@ app.innerHTML = `
           <button class="restart" data-restart>Restart Match</button>
         </div>
       </div>
+      <div data-squad-ui-host></div>
     </section>
   </main>
 `;
@@ -237,6 +244,8 @@ const soundEnableButton = document.querySelector<HTMLButtonElement>("[data-sound
 const audioStatusEl = document.querySelector<HTMLElement>("[data-audio-status]")!;
 const goalMomentEl = document.querySelector<HTMLElement>("[data-goal-moment]")!;
 const motionToggle = document.querySelector<HTMLInputElement>("[data-reduced-motion]")!;
+const squadOpenButton = document.querySelector<HTMLButtonElement>("[data-squad-open]")!;
+const squadUIHost = document.querySelector<HTMLDivElement>("[data-squad-ui-host]")!;
 let reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 motionToggle.checked = reducedMotion;
 const playerAnimations = new PlayerAnimationSystem();
@@ -284,6 +293,13 @@ const keeperDistributions = new Map<string, { choice: KeeperDistributionChoice; 
 let pendingPass: { passerId: string; team: TeamId; targetId: string } | null = null;
 let releaseLock: { playerId: string; remaining: number } | null = null;
 const cameraSystem = new CameraSystem();
+const squadStore = createSquadStore();
+let currentHomeTeam: TeamData = {
+  ...realMadrid,
+  players: buildMatchTeamData(squadStore.snapshot).map(({ id: _cardId, ...player }) => player)
+};
+let squadUI: SquadUI;
+let squadPausedMatch = false;
 
 let lastMovementResult: MovementResult | null = null;
 let lastDribblingResult: DribblingResult | null = null;
@@ -346,12 +362,55 @@ function createPlayer(team: TeamData, spec: PlayerData): Player {
 }
 
 function setupPlayers() {
-  homePlayers = realMadrid.players.map((spec) => createPlayer(realMadrid, spec));
+  homePlayers = currentHomeTeam.players.map((spec) => createPlayer(currentHomeTeam, spec));
   awayPlayers = manCity.players.map((spec) => createPlayer(manCity, spec));
   players = [...homePlayers, ...awayPlayers];
   activePlayer = homePlayers.find((p) => p.short === "Vini Jr.") ?? homePlayers[8];
   activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
   activePlayer.marker.scale.setScalar(1.16);
+}
+
+function removePlayerVisuals(teamPlayersToRemove: readonly Player[]) {
+  const disposedMaterials = new Set<THREE.Material>();
+  const disposedTextures = new Set<THREE.Texture>();
+  for (const player of teamPlayersToRemove) {
+    scene.remove(player.mesh);
+    player.mesh.traverse((object) => {
+      if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
+      // Player rig geometries are module-level buffers shared with the away
+      // team and the replacement XI, so only per-player materials/textures
+      // are released here.
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!material || disposedMaterials.has(material)) continue;
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture && !disposedTextures.has(value)) {
+            disposedTextures.add(value);
+            value.dispose();
+          }
+        }
+        disposedMaterials.add(material);
+        material.dispose();
+      }
+    });
+  }
+}
+
+function rebuildHomeSquad() {
+  releaseBall();
+  playerAnimations.reset();
+  removePlayerVisuals(homePlayers);
+  currentHomeTeam = {
+    ...realMadrid,
+    players: buildMatchTeamData(squadStore.snapshot).map(({ id: _cardId, ...player }) => player)
+  };
+  homePlayers = currentHomeTeam.players.map((spec) => createPlayer(currentHomeTeam, spec));
+  players = [...homePlayers, ...awayPlayers];
+  activePlayer = homePlayers.find((player) => player.role !== "GK") ?? homePlayers[0];
+  activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
+  activePlayer.marker.scale.setScalar(1.16);
+  resetMatch();
+  addFeed(`Squad confirmed: ${squadStore.snapshot.formationId}.`);
 }
 
 function resetMatch() {
@@ -426,6 +485,13 @@ function teamPlayers(team: TeamId) {
   return eligiblePlayers().filter((player) => player.team === team);
 }
 
+function preferredRestartTakerId(plan: RestartPlan): string | undefined {
+  if (plan.team !== "home" || !["penalty", "freeKick", "corner"].includes(plan.kind)) return undefined;
+  const cardId = squadStore.snapshot.setPieces[plan.kind as "penalty" | "freeKick" | "corner"];
+  const card = homeSquadCards.find((candidate) => candidate.id === cardId);
+  return card ? `home-${card.number}` : undefined;
+}
+
 function prepareRestart(plan: RestartPlan, startCountdown = true) {
   releaseBall();
   pendingPass = null;
@@ -435,7 +501,13 @@ function prepareRestart(plan: RestartPlan, startCountdown = true) {
   footballAI.reset();
   keeperDistributions.clear();
   pendingRestart = plan;
-  restartPlacement = positionRestart({ restart: plan, players: eligiblePlayers(), bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS });
+  restartPlacement = positionRestart({
+    restart: plan,
+    players: eligiblePlayers(),
+    bounds: { halfWidth: HALF_W, halfLength: HALF_L },
+    ballRadius: BALL_RADIUS,
+    preferredTakerId: preferredRestartTakerId(plan)
+  });
   ball.position.copy(restartPlacement.ballPosition);
   ball.mesh.position.copy(ball.position);
   ball.velocity.set(0, 0, 0);
@@ -700,6 +772,24 @@ function updatePlayerMovement(player: Player, inputDirection: THREE.Vector3, spr
   return result;
 }
 
+function homeRuntimeTactics(): RuntimeTeamTactics {
+  const state = squadStore.snapshot;
+  const cardById = new Map(homeSquadCards.map((card) => [card.id, card]));
+  const instructions: RuntimeTeamTactics["instructions"] = {};
+  for (const [cardId, instruction] of Object.entries(state.tactics.instructions)) {
+    const card = cardById.get(cardId);
+    if (card) instructions[`home-${card.number}`] = instruction.role;
+  }
+  return {
+    defensiveLine: state.tactics.defensiveLine,
+    pressingIntensity: state.tactics.pressingIntensity,
+    buildUpSpeed: state.tactics.buildUpSpeed,
+    passingStyle: state.tactics.passingStyle,
+    attackWidth: state.tactics.attackWidth,
+    instructions
+  };
+}
+
 function updateAI(dt: number) {
   const dismissedCount = referee.dismissedIds.size;
   footballAI.update({
@@ -709,7 +799,8 @@ function updateAI(dt: number) {
     ball,
     ballOwner,
     activePlayer: spectatorMode ? null : activePlayer,
-    teams: { home: realMadrid, away: manCity },
+    teams: { home: currentHomeTeam, away: manCity },
+    tactics: { home: homeRuntimeTactics() },
     bounds: { halfWidth: HALF_W, halfLength: HALF_L },
     playerRadius: PLAYER_RADIUS,
     dt,
@@ -1124,6 +1215,21 @@ function phase5DebugState() {
     frames: { samples: sorted.length, medianMs: sorted[Math.floor(sorted.length / 2)] ?? 0, p95Ms: sorted[Math.floor(sorted.length * 0.95)] ?? 0 } };
 }
 
+function phase6DebugState() {
+  const squad = squadStore.snapshot;
+  return {
+    revision: squadStore.revision,
+    formation: squad.formationId,
+    starters: Object.values(squad.starters),
+    overall: teamOverall(squad),
+    chemistry: chemistry(squad),
+    validation: validateSquad(squad),
+    tactics: homeRuntimeTactics(),
+    setPieces: { ...squad.setPieces },
+    ui: squadUI?.debugSnapshot() ?? null
+  };
+}
+
 function updatePresentation(dt: number) {
   if (matchState.status === "paused" || document.hidden) return;
   if (!reducedMotion) playerAnimations.update(players, dt * GAME_SPEED, matchState.status === "playing");
@@ -1237,6 +1343,7 @@ function updateRenderDebug() {
     phase3: phase3DebugState(),
     phase4: phase4DebugState(),
     phase5: phase5DebugState(),
+    phase6: phase6DebugState(),
     stateHash: stateHash({ elapsed: matchState.elapsed, score: matchState.score, owner: matchState.ballOwnerId, active: matchState.activePlayerId, ball: ball.position.toArray(), velocity: ball.velocity.toArray() })
   });
   if (aiDebugToggle.checked && (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000)) {
@@ -1290,6 +1397,11 @@ function setupInput() {
   aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch());
   aiSettings.querySelector<HTMLButtonElement>("[data-match-pause]")!.addEventListener("click", () => {
     togglePause();
+  });
+  squadOpenButton.addEventListener("click", () => {
+    squadPausedMatch = matchFlow.pause();
+    matchAudio.setActive(false);
+    squadUI.open();
   });
   aiSettings.querySelectorAll<HTMLInputElement>("[data-rule]").forEach((input) => input.addEventListener("change", () => {
     referee.setOptions({ [input.dataset.rule!]: input.checked });
@@ -1392,6 +1504,19 @@ stadium.setReducedMotion(reducedMotion);
 document.querySelector(".game-root")!.classList.toggle("reduced-motion", reducedMotion);
 setupPlayers();
 scene.add(ball.mesh);
+squadUI = new SquadUI({
+  root: squadUIHost,
+  store: squadStore,
+  onPlay: () => {
+    squadPausedMatch = false;
+    rebuildHomeSquad();
+  },
+  onClose: (reason) => {
+    if (reason === "close" && squadPausedMatch) matchFlow.resume();
+    squadPausedMatch = false;
+    matchAudio.setActive(!document.hidden && matchState.status !== "paused");
+  }
+});
 setupInput();
 window.__eliteKickoffDebug = {
   sampleCanvas,
@@ -1404,7 +1529,8 @@ window.__eliteKickoffDebug = {
     phase2: phase2DebugState(),
     phase3: phase3DebugState(),
     phase4: phase4DebugState(),
-    phase5: phase5DebugState()
+    phase5: phase5DebugState(),
+    phase6: phase6DebugState()
   })
 };
 resetMatch();

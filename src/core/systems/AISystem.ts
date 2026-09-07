@@ -8,11 +8,14 @@ import { getAIDifficulty, type AIDifficultyLevel } from "./AIDifficulty";
 import { AI_ACTIONS, type AIAction, type AIDecisionResult, type TeamPossessionState } from "./AIDecisionDebug";
 import { planBothTeamsSpatialAI, type SpatialAIMetrics } from "./SpatialAISystem";
 import { findOpenPassingOptions, analyzePassingLane } from "./PassingLane";
+import { getTacticalModifiers, getTacticalPresserLimit, resolveTeamTactics, type RuntimeTeamTacticsByTeam } from "./TacticsSystem";
 
 export type AIContext = {
   players: SimPlayer[]; ball: SimBall; ballOwner: SimPlayer | null; activePlayer: SimPlayer | null;
   teams: Record<TeamId, TeamData>; bounds: FieldBounds; playerRadius: number; dt: number;
   random: (min: number, max: number) => number;
+  /** Optional Phase 6D runtime tactics keyed by team; omitted preserves Phase 3 behavior. */
+  tactics?: RuntimeTeamTacticsByTeam;
   goalkeeperConfig?: Partial<GoalkeeperConfig>;
   /** Dedicated keeper brain owns keeper movement/distribution when true. */
   goalkeepersManagedExternally?: boolean;
@@ -77,17 +80,24 @@ export class FootballAISystem {
     const ownerId = ballOwner?.id ?? null;
     if (ownerId !== this.possession || (activePlayer?.id ?? null) !== this.activePlayerId) this.memory.clear();
     this.possession = ownerId; this.activePlayerId = activePlayer?.id ?? null;
-    const plans = planBothTeamsSpatialAI({ players, ballPosition: ball.position, ballOwner, teams, bounds });
+    const plans = planBothTeamsSpatialAI({ players, ballPosition: ball.position, ballOwner, teams, bounds, tactics: context.tactics });
     const difficulty = getAIDifficulty(this.difficulty);
     // Reserve AI pressing slots independently of the controlled player. Always
     // send one recovery player even when a loose ball is outside press range.
     for (const teamId of ["home", "away"] as const) {
       const plan = plans[teamId];
       const target = ballOwner?.position ?? ball.position;
+      const teamTactics = resolveTeamTactics(context.tactics, teamId);
+      const tacticalModifiers = teamTactics ? getTacticalModifiers(teamTactics) : undefined;
+      const pressingDistance = teamTactics ? 24 * tacticalModifiers!.pressureDistanceMultiplier : 24;
+      const tacticalLimit = teamTactics ? getTacticalPresserLimit(teamTactics, 2) : undefined;
       const ranked = players.filter((p) => p.team === teamId && p.role !== "GK" && p.id !== activePlayer?.id)
         .sort((a, b) => a.position.distanceToSquared(target) - b.position.distanceToSquared(target) || a.id.localeCompare(b.id));
       const pressers = ballOwner?.team !== teamId
-        ? ranked.filter((p, index) => index === 0 || p.position.distanceTo(target) <= 24).slice(0, ballOwner ? 2 : 1) : [];
+        ? ranked
+          .filter((p, index) => index === 0 || p.position.distanceTo(target) <= pressingDistance)
+          .slice(0, ballOwner ? (tacticalLimit ?? 2) : Math.min(1, tacticalLimit ?? 1))
+        : [];
       const ids = new Set(pressers.map((p) => p.id));
       for (const decision of plan.decisions) {
         if (decision.reason === "press" && !ids.has(decision.playerId)) {
@@ -120,13 +130,29 @@ export class FootballAISystem {
       } else {
         const opponents = players.filter((p) => p.team !== player.team);
         const teammates = players.filter((p) => p.team === player.team);
+        const playerTactics = resolveTeamTactics(context.tactics, player.team);
+        const playerTacticalModifiers = playerTactics ? getTacticalModifiers(playerTactics) : undefined;
+        const passingLaneConfig = playerTactics
+          ? {
+            minPassDistance: 3 * playerTacticalModifiers!.passDistanceMultiplier,
+            maxPassDistance: 35 * playerTacticalModifiers!.passDistanceMultiplier
+          }
+          : undefined;
+        const tacticalTeammates = playerTactics
+          ? teammates.map((teammate) => {
+            const shapeTarget = plans[player.team].shape.targets.find((target) => target.playerId === teammate.id);
+            return shapeTarget ? { ...teammate, position: shapeTarget.position.clone() } : teammate;
+          })
+          : teammates;
         let memory = this.memory.get(player.id);
         if (!memory || this.nowMs >= memory.decision.nextDecisionAtMs) {
           const direction = teams[player.team].attackingDirection;
           const distanceToGoal = Math.hypot(player.position.x, bounds.halfLength * direction - player.position.z);
           const nearestOpponent = Math.min(40, ...opponents.map((p) => player.position.distanceTo(p.position)));
           const pressure = clamp01(1 - nearestOpponent / 9);
-          const options = ballOwner === player ? findOpenPassingOptions(player, teammates, opponents, direction) : [];
+          const options = ballOwner === player
+            ? findOpenPassingOptions(player, tacticalTeammates, opponents, direction, passingLaneConfig)
+            : [];
           // Progress or escape pressure; avoid endless lateral pass exchanges.
           const pass = options.find((option) => !option.lane.blocked && (option.forwardProgress > 2 || pressure > 0.45));
           const unavailable: AIAction[] = [];
@@ -149,7 +175,10 @@ export class FootballAISystem {
             unavailableActions: unavailable
           }, { difficulty, random: () => context.random(0, 1) });
           if (ballOwner === player) {
-            target.set(player.position.x * 0.45, 0, THREE.MathUtils.clamp(player.position.z + direction * 12, -bounds.halfLength + 2, bounds.halfLength - 2));
+            const carryDistance = playerTacticalModifiers
+              ? THREE.MathUtils.clamp(12 * playerTacticalModifiers.supportForwardMultiplier, 6, 22)
+              : 12;
+            target.set(player.position.x * 0.45, 0, THREE.MathUtils.clamp(player.position.z + direction * carryDistance, -bounds.halfLength + 2, bounds.halfLength - 2));
             if (decision.action === "hold") target.copy(player.position);
           } else decision.reason += `; ${spatial.reason === "press" && !ballOwner ? "recover loose ball" : spatial.reason} assignment`;
           memory = { decision, target: target.clone(), passTargetId: pass?.player.id, executed: false };

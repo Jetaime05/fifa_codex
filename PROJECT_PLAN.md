@@ -1727,6 +1727,8 @@ Out of Scope:
 
 ### Phase 6 - Squad, Cards, Tactics
 
+Implementation status (2026-09-07): Phase 6A–6E local prototype implemented and PM-reviewed. The Squad Hub edits a persisted 18-card squad, loads the selected XI/formation into the match, exposes card details and set-piece roles, and sends team/player tactics to the live AI. `npm.cmd test` passes 232 tests across 39 files and `npm.cmd run build` passes; see `artifacts/phase6/QA.md` for browser evidence, corrections and remaining limitations. Recorded demo media and bundle code splitting remain follow-ups.
+
 Goal:
 
 Create the management layer.
