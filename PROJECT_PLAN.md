@@ -1,6 +1,6 @@
 # Pitch11 - Ultimate FC Mobile Inspired Football Platform Master Plan
 
-Last updated: 2026-05-18  
+Last updated: 2026-09-08
 Codename: `Pitch11`  
 Prototype name: `Elite Kickoff 3D POC`  
 Ambition level: Moonshot  
@@ -1834,6 +1834,28 @@ Out of Scope:
 - Real-money economy.
 - Full transfer market.
 - Licensed card art.
+
+### Phase 6.5 - Football Realism (WIP checkpoint; not accepted)
+
+Implementation status (2026-09-08): The realism recommendations in [`artifacts/realism/REVIEW.md`](./artifacts/realism/REVIEW.md) are captured in the current Phase 6.5 integration checkpoint under the owner-requested development freeze and checkpoint delivery. The pre-checkpoint baseline was `7814941 Add durable Codex project handoff`; this checkpoint is deliberately narrower than the full recommendation list and is documented with current evidence and limits in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md). Root owns review and final Git delivery. It must pass root review before Phase 7 work resumes.
+
+Current checkpoint scope:
+
+- Shared football scale tuning, including ball radius, restart placement, first-touch and dribble configuration alignment.
+- Simulation-owned timed ball actions with preparation, contact and recovery phases, action cancellation and simulation-clock presentation synchronization.
+- Physical impulse dribbling/first-touch continuity, possession turnover invalidation, event-based duel/shielding integration and a two-presser ceiling preserved in AI.
+- Live receiver pass intent and trajectory/reachability prediction, stationary facing preservation, camera-relative controls for the sideline view and a sideline broadcast camera.
+- Preferred-foot/body metadata through the existing fictional data and management conversion path.
+- Through, lob, cross and chip controls are partially wired in the current checkpoint; the complete aerial loop is not part of this acceptance claim.
+
+Frozen verification and review gate:
+
+- `npm.cmd test`: **261 passed / 262 total across 43 files, with one failure** in `DribblingSystem.test.ts` for the distant/sharp-turn ownership-release expectation. This failure remains future work.
+- `npm.cmd run build`: passes TypeScript and Vite; the main chunk is about 721.69 kB minified / 198.46 kB gzip and still exceeds Vite's advisory threshold.
+- Integrated runtime evidence is still required for pause mid-windup, ownership turnover, restart/squad Play reset, one physical release, contact reach/height and contact-to-pose/audio alignment.
+- Keeper swept contact before the goal plane, moving receiver behavior, failed versus successful duels, first-touch retained velocity and physical dribble continuity need focused cross-system evidence.
+- The frozen review also found the camera-relative screen-right basis reversed for the sideline view, and the current goal-mouth/keeper path changes goal adjudication from the whole-ball line to goal depth; both require geometry review before acceptance.
+- Root must complete final browser checks on desktop and 390×844, including manual/touch flows and console output. Phase 6.5 is not accepted and Phase 7 remains unstarted.
 
 ### Phase 7 - Progression And Modes
 

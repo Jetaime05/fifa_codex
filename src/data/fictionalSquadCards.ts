@@ -12,7 +12,10 @@ export const realMadridCards: PlayerCard[] = realMadrid.players.map((player) => 
   primaryRole: player.role,
   positions: [player.role],
   rarity: "legendary",
-  attributes: { ...player.stats }
+  attributes: { ...player.stats },
+  preferredFoot: player.preferredFoot,
+  heightScale: player.heightScale,
+  weightScale: player.weightScale
 }));
 
 /**

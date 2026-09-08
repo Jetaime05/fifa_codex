@@ -43,6 +43,20 @@ describe("stadium presentation", () => {
     expect(() => JSON.stringify(stadium.debugSnapshot())).not.toThrow();
   });
 
+  it("uses human silhouette geometry and keeps goal reactions restrained", () => {
+    const scene = new THREE.Scene(); const stadium = addPitch(scene);
+    const crowd = scene.getObjectByName("instanced-crowd") as THREE.InstancedMesh;
+    const heads = scene.getObjectByName("crowd-heads") as THREE.InstancedMesh;
+    expect(crowd.geometry.type).toBe("CapsuleGeometry");
+    expect(heads.geometry.type).toBe("SphereGeometry");
+    const baseline = crowd.instanceMatrix.array.slice();
+    stadium.goal("home", new THREE.Vector3(0, 2, 57));
+    stadium.update(0.12, new THREE.Vector3(), 0);
+    expect(Array.from(crowd.instanceMatrix.array).every(Number.isFinite)).toBe(true);
+    const maxChange = Math.max(...Array.from(crowd.instanceMatrix.array, (value, index) => Math.abs(value - baseline[index])));
+    expect(maxChange).toBeLessThan(0.65);
+  });
+
   it("ripples only the scored net and keeps the boundary threads anchored", () => {
     const scene = new THREE.Scene(); const stadium = addPitch(scene);
     const net = scene.getObjectByName("goal-net-1") as THREE.LineSegments;

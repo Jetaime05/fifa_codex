@@ -638,7 +638,10 @@ export function buildMatchTeamData(
       role: slot.role,
       number,
       formation: { x: slot.x, z: slot.z },
-      stats: cloneAttributes(card.attributes)
+      stats: cloneAttributes(card.attributes),
+      preferredFoot: card.preferredFoot,
+      heightScale: card.heightScale,
+      weightScale: card.weightScale
     };
   });
 }

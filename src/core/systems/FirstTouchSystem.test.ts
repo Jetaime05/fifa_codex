@@ -92,5 +92,15 @@ describe("FirstTouchSystem", () => {
     expect(result.retained).toBe(true);
     expect(result.shouldReleaseBall).toBe(false);
   });
-});
 
+  it("makes pressure reduce control quality while preserving receiver momentum", () => {
+    const player = createPlayer(80);
+    player.velocity.set(0, 0, 4);
+    const ball = createBall(new THREE.Vector3(0, 0, 10));
+    const clean = evaluateFirstTouch({ player, ball, pressure: 0 });
+    const pressured = evaluateFirstTouch({ player, ball, pressure: 1 });
+    expect(clean.touchQuality).toBeGreaterThan(pressured.touchQuality);
+    expect(clean.outgoingVelocity.length()).toBeGreaterThan(0);
+    expect(pressured.pressure).toBe(1);
+  });
+});

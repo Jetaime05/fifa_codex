@@ -49,8 +49,26 @@ export function resolveOutOfPlay({ previousPosition, position, bounds, ballRadiu
     return { kind: "restart", restart: createRestartPlan({ kind: "throwIn", team: opposite(lastTouchTeam ?? "home"), position: point, bounds, ballRadius, reason: "Ball wholly crossed the touchline" }) };
   }
   const scoringTeam: TeamId = Math.sign(attackingDirections.home) === crossing.side ? "home" : "away";
-  if (Math.abs(point.x) + ballRadius < goalWidth / 2 && point.y + ballRadius < 4.8) {
-    return { kind: "goal", team: scoringTeam, position: point };
+  const goalMouthAtEdge = Math.abs(point.x) + ballRadius < goalWidth / 2 && point.y + ballRadius < 4.8;
+  if (goalMouthAtEdge) {
+    // The pitch edge is outside the goal plane. Keep the ball live through
+    // the mouth so a keeper can make a physically reachable save before the
+    // whole ball crosses the depth of the goal. This also prevents a keeper
+    // save from teleporting a ball that has already scored.
+    const goalDepth = 0.8;
+    const goalPlane = bounds.halfLength + goalDepth;
+    const currentAlong = position.z * crossing.side;
+    if (currentAlong < goalPlane) return null;
+    const planeDelta = position.z - previousPosition.z;
+    const planeT = previousPosition.z * crossing.side >= goalPlane
+      ? 0
+      : planeDelta === 0
+        ? 1
+        : (crossing.side * goalPlane - previousPosition.z) / planeDelta;
+    const goalPoint = previousPosition.clone().lerp(position, clamp(planeT, 0, 1));
+    if (Math.abs(goalPoint.x) + ballRadius < goalWidth / 2 && goalPoint.y + ballRadius < 4.8) {
+      return { kind: "goal", team: scoringTeam, position: goalPoint };
+    }
   }
   const defendingTeam = opposite(scoringTeam);
   const kind = lastTouchTeam === defendingTeam ? "corner" : "goalKick";

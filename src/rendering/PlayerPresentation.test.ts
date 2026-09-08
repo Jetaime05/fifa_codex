@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import type { PlayerData, TeamData } from "../data/types";
 import type { SimPlayer } from "../core/systems/types";
-import { createPlayerRig, PlayerAnimationSystem, type PlayerAction } from "./PlayerPresentation";
+import { createPlayerRig, PlayerAnimationSystem, type PlayerAction, type PreferredFoot } from "./PlayerPresentation";
 
 const spec: PlayerData = {
   name: "Prototype Player", short: "PLAYER", role: "FWD", number: 9,
@@ -29,6 +29,8 @@ describe("PlayerPresentation", () => {
   it("creates an articulated DOM-free rig with the original raycast and marker contract", () => {
     const { group, body, marker, rig } = fixture();
     expect(body.isMesh).toBe(true);
+    expect(body).toBeInstanceOf(THREE.SkinnedMesh);
+    expect(rig.skeleton.bones.map((bone) => bone.name)).toEqual(expect.arrayContaining(["hips", "spine", "chest"]));
     expect(group.getObjectByName("shirt-raycast-target")).toBe(body);
     expect(marker.parent).toBe(group);
     expect(marker.material.opacity).toBe(0);
@@ -37,6 +39,62 @@ describe("PlayerPresentation", () => {
     group.updateMatrixWorld(true);
     const ray = new THREE.Raycaster(new THREE.Vector3(7, 2.1, 10), new THREE.Vector3(0, 0, -1));
     expect(ray.intersectObject(body).length).toBeGreaterThan(0);
+  });
+
+  it("keeps simulation-clock actions frozen until sync and reaches a finite foot contact marker", () => {
+    const { player, system, rig } = fixture();
+    const forward = new THREE.Vector3(Math.sin(player.mesh.rotation.y), 0, Math.cos(player.mesh.rotation.y));
+    const target = player.position.clone().addScaledVector(forward, 1.02).add(new THREE.Vector3(0, 0.22, 0));
+    system.startAction(player.id, "pass", { clock: "simulation", preferredFoot: "left", contactAt: 0.5, contactTarget: target });
+    system.update([player], 0.2);
+    expect(system.getActionTiming(player.id)?.elapsed).toBe(0);
+    expect(system.isActionContactReached(player.id)).toBe(false);
+    system.syncActionContact(player.id, { progress: 0.35 });
+    system.update([player], 0);
+    const windupRotation = rig.leftLeg.rotation.x;
+    expect(system.syncActionContact(player.id, { progress: 0.5 })).toBe(true);
+    system.update([player], 0);
+    const foot = system.getFootWorldPosition(player, "left");
+    expect(foot).not.toBeNull();
+    expect(Math.abs(rig.leftLeg.rotation.x - windupRotation)).toBeLessThan(1.1);
+    expect(foot!.distanceTo(target)).toBeLessThan(0.25);
+    expect(foot!.y).toBeGreaterThan(0.02);
+    expect(foot!.y).toBeLessThan(0.5);
+    expect(system.cancelAction(player.id)).toBe(true);
+    expect(system.getActionTiming(player.id)).toBeNull();
+    system.startAction(player.id, "shot", { clock: "simulation" });
+    system.syncActionContact(player.id, { elapsed: 0.62 });
+    expect(system.getActionTiming(player.id)).toBeNull();
+  });
+
+  it.each<[PreferredFoot, number]>([["left", 0], ["right", 1.3]])("reaches a live-height contact marker with the %s foot at yaw %s", (preferredFoot, yaw) => {
+    const { player, system } = fixture();
+    player.mesh.rotation.y = yaw;
+    const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    const target = player.position.clone().addScaledVector(forward, 1.08).add(new THREE.Vector3(0, 0.22, 0));
+    system.startAction(player.id, "shot", { clock: "simulation", contactAt: 0.48, preferredFoot, contactTarget: target });
+    system.syncActionContact(player.id, { progress: 0.48 });
+    system.update([player], 0);
+    const foot = system.getFootWorldPosition(player, preferredFoot)!;
+    const support = system.getFootWorldPosition(player, preferredFoot === "left" ? "right" : "left")!;
+    expect(foot.distanceTo(target)).toBeLessThan(0.25);
+    expect(foot.y).toBeGreaterThan(0.02);
+    expect(foot.y).toBeLessThan(0.48);
+    expect(support.y).toBeGreaterThan(-0.08);
+    expect(support.y).toBeLessThan(0.3);
+  });
+
+  it.each([0.8, 4, 10])("keeps both feet grounded while locomotion is blended at %s speed", (speed) => {
+    const { player, system } = fixture();
+    player.velocity.set(0, 0, speed);
+    for (let i = 0; i < 24; i += 1) system.update([player], 1 / 60);
+    const left = system.getFootWorldPosition(player, "left")!;
+    const right = system.getFootWorldPosition(player, "right")!;
+    expect(left.y).toBeGreaterThan(-0.08);
+    expect(left.y).toBeLessThan(0.3);
+    expect(right.y).toBeGreaterThan(-0.08);
+    expect(right.y).toBeLessThan(0.3);
+    expect(Number.isFinite(left.y) && Number.isFinite(right.y)).toBe(true);
   });
 
   it("gives goalkeepers a contrasting generic kit", () => {

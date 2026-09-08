@@ -12,6 +12,7 @@ const TRAIL_CAPACITY = 24;
 const RAIN_COUNT = 220;
 type Weather = "clear" | "rain";
 type GoalNet = { geometry: THREE.BufferGeometry; base: Float32Array; side: -1 | 1; age: number; impactX: number; impactY: number };
+type CrowdInstance = { x: number; y: number; z: number; scale: number; color: THREE.Color };
 const noise = (n: number) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
 
 /** Pitch markings use the playable side of each goal line, not the run-off area. */
@@ -87,6 +88,10 @@ export class StadiumPresentation {
   private trail: THREE.Line;
   private rain: THREE.LineSegments;
   private crowd: THREE.InstancedMesh;
+  private crowdHeads: THREE.InstancedMesh;
+  private crowdData: CrowdInstance[] = [];
+  private crowdTransform = new THREE.Object3D();
+  private lastCrowdReaction = -1;
   private shotRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private fill: THREE.DirectionalLight;
 
@@ -137,8 +142,10 @@ export class StadiumPresentation {
       addBox("sponsor-board", side * 40.2, 0.7, 0, 0.25, 1.4, 116, boardMaterial);
       for (const x of [-23, 23]) addBox("sponsor-board", x, 0.7, side * 63.2, 30, 1.4, 0.25, boardMaterial);
     }
-    // Six tiers on all four sides. Seats and spectators share one instanced draw call.
-    const crowdPositions: { x: number; y: number; z: number; color: THREE.Color }[] = [];
+    // Six tiers on all four sides. Each spectator is a restrained capsule
+    // silhouette plus a small head sphere, both instanced to keep the arena
+    // bounded while reading as people from the broadcast camera.
+    const crowdPositions: CrowdInstance[] = [];
     const crowdColors = [0xcac7b2, 0x5690a8, 0x1c6078, 0xb4d7ce, 0x9f7457, 0x3d5065];
     for (const side of [-1, 1]) for (let tier = 0; tier < 6; tier += 1) {
       const y = 1.8 + tier * 1.9;
@@ -146,18 +153,46 @@ export class StadiumPresentation {
       addBox("stand-tier", 0, y / 2, side * (70 + tier * 2.8), 91, y, 2.8, concrete);
       for (let seat = 0; seat < 62; seat += 1) {
         if (seat % 16 === 0) continue;
-        crowdPositions.push({ x: side * (47 + tier * 2.8), y: y + 0.52, z: -61 + seat * 2, color: new THREE.Color(crowdColors[(seat * 7 + tier * 3) % crowdColors.length]) });
+        crowdPositions.push({ x: side * (47 + tier * 2.8), y: y + 0.52, z: -61 + seat * 2, scale: 0.82 + noise(seat + tier * 101) * 0.32, color: new THREE.Color(crowdColors[(seat * 7 + tier * 3) % crowdColors.length]) });
       }
       for (let seat = 0; seat < 44; seat += 1) {
         if (seat % 12 === 0) continue;
-        crowdPositions.push({ x: -43 + seat * 2, y: y + 0.52, z: side * (70 + tier * 2.8), color: new THREE.Color(crowdColors[(seat * 3 + tier * 5) % crowdColors.length]) });
+        crowdPositions.push({ x: -43 + seat * 2, y: y + 0.52, z: side * (70 + tier * 2.8), scale: 0.82 + noise(seat + tier * 113 + 17) * 0.32, color: new THREE.Color(crowdColors[(seat * 3 + tier * 5) % crowdColors.length]) });
       }
     }
-    this.crowd = new THREE.InstancedMesh(new THREE.BoxGeometry(0.9, 1.05, 0.85), new THREE.MeshStandardMaterial({ roughness: 0.85 }), crowdPositions.length);
+    this.crowdData = crowdPositions;
+    this.crowd = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.32, 0.58, 3, 6), new THREE.MeshStandardMaterial({ roughness: 0.85, vertexColors: true }), crowdPositions.length);
     this.crowd.name = "instanced-crowd";
-    const transform = new THREE.Object3D();
-    crowdPositions.forEach((seat, index) => { transform.position.set(seat.x, seat.y, seat.z); transform.scale.y = 0.8 + noise(index) * 0.4; transform.updateMatrix(); this.crowd.setMatrixAt(index, transform.matrix); this.crowd.setColorAt(index, seat.color); });
+    this.crowdHeads = new THREE.InstancedMesh(new THREE.SphereGeometry(0.22, 6, 4), new THREE.MeshStandardMaterial({ roughness: 0.88, vertexColors: true }), crowdPositions.length);
+    this.crowdHeads.name = "crowd-heads";
+    const transform = this.crowdTransform;
+    crowdPositions.forEach((seat, index) => {
+      transform.position.set(seat.x, seat.y, seat.z);
+      transform.scale.set(0.78 + seat.scale * 0.12, seat.scale, 0.78 + seat.scale * 0.12);
+      transform.rotation.set(0, 0, 0);
+      transform.updateMatrix();
+      this.crowd.setMatrixAt(index, transform.matrix);
+      this.crowd.setColorAt(index, seat.color);
+      transform.position.set(seat.x, seat.y + 0.97 * seat.scale, seat.z);
+      transform.scale.setScalar(0.78 + seat.scale * 0.12);
+      transform.updateMatrix();
+      this.crowdHeads.setMatrixAt(index, transform.matrix);
+      this.crowdHeads.setColorAt(index, seat.color);
+    });
+    this.crowd.instanceMatrix.needsUpdate = true;
+    this.crowdHeads.instanceMatrix.needsUpdate = true;
     this.group.add(this.crowd);
+    this.group.add(this.crowdHeads);
+    // Subtle worn lanes add material variation without changing gameplay
+    // friction or field bounds. These are intentionally translucent and few.
+    const wearMaterial = new THREE.MeshStandardMaterial({ color: 0x356d43, transparent: true, opacity: 0.11, roughness: 1, depthWrite: false });
+    for (const [x, z, w, d] of [[-17, 15, 7, 18], [17, -13, 7, 18], [0, 39, 10, 5], [0, -39, 10, 5]] as const) {
+      const patch = new THREE.Mesh(new THREE.PlaneGeometry(w, d), wearMaterial);
+      patch.name = "pitch-wear";
+      patch.rotation.x = -Math.PI / 2;
+      patch.position.set(x, 0.019, z);
+      this.group.add(patch);
+    }
     const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x293d49, metalness: 0.38, roughness: 0.65 });
     const ledMaterial = new THREE.MeshBasicMaterial({ color: 0x72cbbd });
     for (const side of [-1, 1]) {
@@ -214,6 +249,31 @@ export class StadiumPresentation {
     net.age = 0; net.impactX = THREE.MathUtils.clamp(position.x, -GOAL_WIDTH / 2, GOAL_WIDTH / 2); net.impactY = THREE.MathUtils.clamp(position.y, 0.5, GOAL_HEIGHT - 0.5); this.goalAge = 0;
     this.trailSamples.length = 0; this.trail.geometry.setDrawRange(0, 0);
   }
+
+  private updateCrowdReaction() {
+    const reaction = !this.reducedMotion && this.goalAge < 2
+      ? Math.exp(-this.goalAge * 1.45) * 0.22 * Math.abs(Math.sin(this.goalAge * 10))
+      : 0;
+    if (Math.abs(reaction - this.lastCrowdReaction) < 0.0005) return;
+    this.lastCrowdReaction = reaction;
+    const transform = this.crowdTransform;
+    this.crowdData.forEach((seat, index) => {
+      const variation = noise(index * 2.17 + 0.4);
+      const lift = reaction * (0.35 + variation * 0.65);
+      transform.position.set(seat.x, seat.y + lift, seat.z);
+      transform.scale.set(0.78 + seat.scale * 0.12, seat.scale * (1 + lift * 0.45), 0.78 + seat.scale * 0.12);
+      transform.rotation.z = reaction * (variation - 0.5) * 0.8;
+      transform.updateMatrix();
+      this.crowd.setMatrixAt(index, transform.matrix);
+      transform.position.set(seat.x, seat.y + 0.97 * seat.scale + lift * 1.35, seat.z);
+      transform.scale.setScalar(0.78 + seat.scale * 0.12);
+      transform.updateMatrix();
+      this.crowdHeads.setMatrixAt(index, transform.matrix);
+    });
+    this.crowd.instanceMatrix.needsUpdate = true;
+    this.crowdHeads.instanceMatrix.needsUpdate = true;
+  }
+
   shot(position: THREE.Vector3) {
     if (this.reducedMotion) return;
     this.shotAge = 0; this.shotRing.position.set(position.x, 0.06, position.z);
@@ -222,7 +282,7 @@ export class StadiumPresentation {
   update(dt: number, ballPosition: THREE.Vector3, ballSpeed: number) {
     const step = Number.isFinite(dt) ? THREE.MathUtils.clamp(dt, 0, 0.1) : 0;
     this.elapsed += step; this.goalAge += step; this.shotAge += step;
-    this.crowd.position.y = !this.reducedMotion && this.goalAge < 2 ? Math.abs(Math.sin(this.goalAge * 12)) * 0.26 * Math.exp(-this.goalAge) : 0;
+    this.updateCrowdReaction();
     for (const net of this.nets) {
       if (net.age > 3) continue;
       net.age += step; const attribute = net.geometry.getAttribute("position") as THREE.BufferAttribute;
@@ -261,7 +321,9 @@ export class StadiumPresentation {
   }
   reset() {
     this.elapsed = 0; this.shotAge = 10; this.goalAge = 10; this.trailAccumulator = 0; this.trailSamples.length = 0;
-    this.trail.geometry.setDrawRange(0, 0); this.shotRing.visible = false; this.crowd.position.y = 0;
+    this.trail.geometry.setDrawRange(0, 0); this.shotRing.visible = false;
+    this.lastCrowdReaction = -1;
+    this.updateCrowdReaction();
     for (const net of this.nets) { net.age = 10; const attribute = net.geometry.getAttribute("position") as THREE.BufferAttribute; attribute.array.set(net.base); attribute.needsUpdate = true; net.geometry.computeBoundingSphere(); }
   }
   debugSnapshot() {

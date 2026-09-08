@@ -151,4 +151,46 @@ describe("DribblingSystem", () => {
     const point = system.attachmentPoint(player);
     expect(Math.hypot(point.x - player.position.x, point.z - player.position.z)).toBeCloseTo(0.6);
   });
+
+  it("applies a bounded desired-velocity touch independent of simulation tick size", () => {
+    const impulses = [1 / 30, 1 / 60, 1 / 120].map((dt) => {
+      const player = createPlayer(80);
+      const ball = createBall();
+      ball.position.copy(player.position).add(new THREE.Vector3(0, 0.22, 0.82));
+      const state = { nextTouchAt: 0, touchCount: 0 };
+      return updateDribbling({ player, ball, dt, now: 0, touchState: state, mode: "impulse", random: () => 1 });
+    });
+    expect(impulses.every((result) => result.touchApplied)).toBe(true);
+    expect(impulses[0].touchImpulse.toArray()).toEqual(impulses[1].touchImpulse.toArray());
+    expect(impulses[1].touchImpulse.toArray()).toEqual(impulses[2].touchImpulse.toArray());
+  });
+
+  it("keeps the ball free between discrete contacts and cadence stable at 30/60/120Hz", () => {
+    const counts = [30, 60, 120].map((hz) => {
+      const player = createPlayer(85, 4);
+      const ball = createBall();
+      ball.position.copy(player.position).add(new THREE.Vector3(0, 0.22, 0.86));
+      const state = { nextTouchAt: 0, touchCount: 0 };
+      let betweenTouchResult = updateDribbling({ player, ball, dt: 1 / hz, now: 0, touchState: state, mode: "impulse", random: () => 1 });
+      expect(betweenTouchResult.touchApplied).toBe(true);
+      const velocityAfterFirstTouch = ball.velocity.clone();
+      betweenTouchResult = updateDribbling({ player, ball, dt: 1 / hz, now: 1 / hz, touchState: state, mode: "impulse", random: () => 1 });
+      expect(betweenTouchResult.touchApplied).toBe(false);
+      expect(ball.velocity.equals(velocityAfterFirstTouch)).toBe(true);
+      for (let step = 2; step <= hz; step += 1) updateDribbling({ player, ball, dt: 1 / hz, now: step / hz, touchState: state, mode: "impulse", random: () => 1 });
+      return state.touchCount;
+    });
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+  });
+
+  it("releases ownership when the foot cannot reach a distant or sharp-turn ball", () => {
+    const player = createPlayer(80, 5);
+    player.velocity.set(5, 0, 0);
+    const ball = createBall();
+    ball.position.copy(player.position).add(new THREE.Vector3(0, 0.22, 1.8));
+    const result = updateDribbling({ player, ball, dt: 1 / 60, now: 0, mode: "impulse", random: () => 1 });
+    expect(result.shouldReleaseBall).toBe(true);
+    expect(result.touchApplied).toBe(false);
+    expect(ball.velocity.length()).toBe(0);
+  });
 });

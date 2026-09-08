@@ -19,6 +19,13 @@ export interface MatchAudioOptions {
   maxVoices?: number;
 }
 
+export type MatchAudioEventOptions = {
+  /** Event intensity; 1 is the authored cue level. */
+  strength?: number;
+  /** Approximate pitch-to-listener distance in gameplay units. */
+  distance?: number;
+};
+
 type Voice = { source: AudioScheduledSourceNode; gain: GainNode };
 
 /** Small, asset-free Web Audio mixer. Only enable() is allowed to create/unlock audio. */
@@ -154,6 +161,15 @@ export class MatchAudio {
   }
 
   play(cue: MatchAudioCue): boolean {
+    return this.playEvent(cue);
+  }
+
+  /**
+   * Plays an event with bounded intensity and distance attenuation. The
+   * simulation may provide these values, but this method never reads or
+   * mutates simulation state and remains opt-in behind enable().
+   */
+  playEvent(cue: MatchAudioCue, options: MatchAudioEventOptions = {}): boolean {
     const context = this.context;
     if (!this.enabled || this.muted || !this.active || this.volume === 0 || this.disposed || !context || !this.master || context.state !== "running") return false;
     const now = context.currentTime;
@@ -163,6 +179,11 @@ export class MatchAudio {
     }
     const shape = CUES[cue];
     if (!shape) return false;
+    const strength = Number.isFinite(options.strength) ? Math.max(0, Math.min(1.5, options.strength!)) : 1;
+    const distance = Number.isFinite(options.distance) ? Math.max(0, Math.min(90, options.distance!)) : 0;
+    const attenuation = 1 / (1 + distance * 0.055);
+    if (strength <= 0) return false;
+    const eventLevel = Math.max(0.002, shape.level * strength * attenuation);
     const gain = context.createGain();
     let source: AudioBufferSourceNode | OscillatorNode;
     if (shape.wave === "noise") {
@@ -171,17 +192,18 @@ export class MatchAudio {
     } else {
       source = context.createOscillator();
       source.type = shape.wave;
-      source.frequency.setValueAtTime(shape.frequency, now);
+      const pitch = 1 + (strength - 1) * 0.045;
+      source.frequency.setValueAtTime(shape.frequency * pitch, now);
       if (shape.notes) {
         const oscillator = source;
         const notes = shape.notes;
-        notes.forEach((frequency, index) => oscillator.frequency.setValueAtTime(frequency, now + index * shape.duration / notes.length));
+        notes.forEach((frequency, index) => oscillator.frequency.setValueAtTime(frequency * pitch, now + index * shape.duration / notes.length));
       } else {
-        source.frequency.exponentialRampToValueAtTime(shape.endFrequency, now + shape.duration);
+        source.frequency.exponentialRampToValueAtTime(shape.endFrequency * pitch, now + shape.duration);
       }
     }
     gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(shape.level, now + 0.008);
+    gain.gain.linearRampToValueAtTime(eventLevel, now + 0.008);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + shape.duration);
     source.connect(gain);
     gain.connect(this.master);

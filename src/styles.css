@@ -639,3 +639,129 @@ body {
     grid-auto-rows: 56px;
   }
 }
+
+/* Real-match HUD pass: preserve controls while reducing the amount of glass
+   over the playable area. The clean-view toggle remains available in every
+   breakpoint, so temporary HUD hiding is always reversible. */
+:root {
+  --hud-gutter: clamp(10px, 2vw, 18px);
+  --hud-panel: rgba(7, 15, 14, 0.84);
+  --hud-border: rgba(255, 255, 255, 0.16);
+}
+
+.hud {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.scoreboard {
+  top: max(10px, env(safe-area-inset-top));
+  width: min(460px, calc(100vw - 2 * var(--hud-gutter)));
+  padding: 7px 10px;
+  background: color-mix(in srgb, var(--hud-panel) 92%, transparent);
+}
+
+.score-core {
+  min-width: 94px;
+}
+
+.top-left,
+.player-panel {
+  gap: 6px;
+}
+
+.top-left {
+  top: max(58px, calc(env(safe-area-inset-top) + 48px));
+  left: var(--hud-gutter);
+  max-width: min(290px, calc(100vw - 2 * var(--hud-gutter)));
+}
+
+.player-panel {
+  right: var(--hud-gutter);
+  bottom: max(12px, calc(env(safe-area-inset-bottom) + 10px));
+  width: min(285px, calc(100vw - 2 * var(--hud-gutter)));
+  padding: 9px 10px;
+  background: var(--hud-panel);
+}
+
+.minimap {
+  right: var(--hud-gutter);
+  top: max(70px, calc(env(safe-area-inset-top) + 60px));
+  width: min(205px, 29vw);
+}
+
+.ai-settings {
+  max-height: min(48vh, 410px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #657d8b transparent;
+  background: var(--hud-panel);
+}
+
+.ai-settings details[open] summary {
+  margin-bottom: 6px;
+}
+
+.ai-settings button,
+.ai-settings select,
+.restart,
+.hud-toggle {
+  min-height: 32px;
+}
+
+.hud-toggle {
+  z-index: 12;
+  bottom: max(106px, calc(env(safe-area-inset-bottom) + 92px));
+  border-color: var(--hud-border);
+}
+
+@media (max-width: 760px) {
+  .scoreboard {
+    width: calc(100vw - 20px);
+  }
+
+  .minimap {
+    top: 66px;
+    width: 136px;
+  }
+
+  .player-panel {
+    bottom: max(146px, calc(env(safe-area-inset-bottom) + 132px));
+  }
+
+  .ai-settings {
+    max-height: min(44vh, 300px);
+  }
+
+  .hud-toggle {
+    bottom: max(274px, calc(env(safe-area-inset-bottom) + 248px));
+  }
+
+  /* Clean view hides overlays while keeping the touch controls usable. */
+  .cinematic .mobile-pad {
+    display: flex;
+  }
+
+  .cinematic .hud-toggle {
+    bottom: max(274px, calc(env(safe-area-inset-bottom) + 248px));
+  }
+}
+
+@media (max-width: 460px) {
+  .minimap {
+    width: 122px;
+  }
+
+  .player-panel {
+    bottom: max(154px, calc(env(safe-area-inset-bottom) + 140px));
+  }
+
+  .ai-settings {
+    max-height: min(40vh, 270px);
+  }
+
+  .hud-toggle {
+    bottom: max(282px, calc(env(safe-area-inset-bottom) + 256px));
+    padding: 6px 11px;
+  }
+}

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { SimBall, SimPlayer } from "./types";
+import { DEFAULT_BALL_PHYSICS_CONFIG } from "./GameplayConfig";
 
 /** Tuning values for receiving a moving ball. */
 export type FirstTouchConfig = {
@@ -21,6 +22,10 @@ export type FirstTouchConfig = {
   minimumRetentionQuality: number;
   /** Optional deterministic stat jitter, normally disabled in tests. */
   randomJitter: number;
+  /** Pressure applied by a nearby opponent during the receiving touch. */
+  pressurePenalty: number;
+  /** Portion of player momentum blended into a controlled touch. */
+  receiverMomentumInfluence: number;
 };
 
 export const DEFAULT_FIRST_TOUCH_CONFIG: FirstTouchConfig = {
@@ -30,11 +35,13 @@ export const DEFAULT_FIRST_TOUCH_CONFIG: FirstTouchConfig = {
   maxIncomingSpeed: 28,
   minControlDistance: 0.72,
   maxControlDistance: 1.72,
-  ballHeight: 0.55,
+  ballHeight: DEFAULT_BALL_PHYSICS_CONFIG.radius,
   controlledVelocityRetention: 0.16,
   missedVelocityRetention: 0.72,
   minimumRetentionQuality: 0.27,
-  randomJitter: 0
+  randomJitter: 0,
+  pressurePenalty: 0.24,
+  receiverMomentumInfluence: 0.18
 };
 
 export type FirstTouchInput = {
@@ -43,6 +50,9 @@ export type FirstTouchInput = {
   /** Direction the player is trying to take the touch. */
   controlDirection?: THREE.Vector3;
   incomingVelocity?: THREE.Vector3;
+  /** Optional pressure context; callers can pass opponents instead. */
+  pressure?: number;
+  opponents?: readonly SimPlayer[];
   random?: () => number;
   config?: Partial<FirstTouchConfig>;
 };
@@ -55,6 +65,7 @@ export type FirstTouchResult = {
   controlDistance: number;
   controlPoint: THREE.Vector3;
   outgoingVelocity: THREE.Vector3;
+  pressure: number;
 };
 
 const EPSILON = 0.0001;
@@ -68,6 +79,16 @@ const mergeConfig = (config?: Partial<FirstTouchConfig>): FirstTouchConfig => ({
 });
 
 const normalizeStat = (value: number) => clamp(value / 100, 0, 1);
+
+const horizontalDistance = (a: THREE.Vector3, b: THREE.Vector3) =>
+  Math.hypot(a.x - b.x, a.z - b.z);
+
+const inferPressure = (player: SimPlayer, opponents: readonly SimPlayer[] = []) => {
+  if (opponents.length === 0) return 0;
+  let nearest = Number.POSITIVE_INFINITY;
+  for (const opponent of opponents) nearest = Math.min(nearest, horizontalDistance(player.position, opponent.position));
+  return clamp(1 - nearest / 4.5, 0, 1);
+};
 
 const defaultDirection = (player: SimPlayer) =>
   new THREE.Vector3(0, 0, player.team === "home" ? 1 : -1);
@@ -94,6 +115,8 @@ export function evaluateFirstTouch({
   ball,
   controlDirection,
   incomingVelocity,
+  pressure,
+  opponents,
   random,
   config: configOverrides
 }: FirstTouchInput): FirstTouchResult {
@@ -101,6 +124,7 @@ export function evaluateFirstTouch({
   const incoming = (incomingVelocity ?? ball.velocity).clone();
   const incomingSpeed = incoming.length();
   const dribbling = normalizeStat(player.stats.dribbling);
+  const resolvedPressure = clamp(pressure ?? inferPressure(player, opponents), 0, 1);
   const speedPenalty = clamp(
     incomingSpeed / Math.max(config.maxIncomingSpeed, EPSILON),
     0,
@@ -110,7 +134,7 @@ export function evaluateFirstTouch({
     ? (random() * 2 - 1) * config.randomJitter
     : 0;
   const touchQuality = clamp(
-    config.baseControlQuality + dribbling * config.dribblingInfluence - speedPenalty + jitter,
+    config.baseControlQuality + dribbling * config.dribblingInfluence - speedPenalty - resolvedPressure * config.pressurePenalty + jitter,
     0,
     1
   );
@@ -128,9 +152,17 @@ export function evaluateFirstTouch({
   if (retained) {
     // A good touch kills most of the incoming pace while leaving a small
     // amount in the player's chosen direction for a natural next action.
-    outgoingVelocity = direction.clone().multiplyScalar(
-      incomingSpeed * (1 - touchQuality) * config.controlledVelocityRetention
+    const incomingDirection = incoming.clone();
+    incomingDirection.y = 0;
+    if (incomingDirection.lengthSq() > EPSILON) incomingDirection.normalize();
+    const retainedSpeed = incomingSpeed * (
+      config.controlledVelocityRetention + (1 - touchQuality) * 0.36 + resolvedPressure * 0.12
     );
+    const momentum = new THREE.Vector3(player.velocity.x, 0, player.velocity.z)
+      .multiplyScalar(config.receiverMomentumInfluence);
+    outgoingVelocity = direction.clone().multiplyScalar(retainedSpeed * 0.75)
+      .add(incomingDirection.multiplyScalar(retainedSpeed * 0.25))
+      .add(momentum);
   } else {
     // A poor touch keeps the incoming trajectory, making a hard pass readable
     // as a mistake rather than silently snapping to the player's feet.
@@ -142,6 +174,7 @@ export function evaluateFirstTouch({
     retained,
     shouldReleaseBall: !retained,
     incomingSpeed,
+    pressure: resolvedPressure,
     controlDistance,
     controlPoint,
     outgoingVelocity
@@ -190,4 +223,3 @@ export class FirstTouchSystem {
     return applyFirstTouch({ ...input, config: this.config });
   }
 }
-

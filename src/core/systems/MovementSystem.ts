@@ -18,6 +18,8 @@ export type MovementConfig = {
   deceleration: number;
   /** Maximum horizontal direction change in radians per second. */
   turnRateRadiansPerSecond: number;
+  /** Extra deceleration applied while carrying momentum through a turn. */
+  turnDeceleration: number;
   /** Rotation smoothing rate in radians per second. */
   rotationSmoothing: number;
   sprintStaminaCost: number;
@@ -36,6 +38,7 @@ export const DEFAULT_MOVEMENT_CONFIG: MovementConfig = {
   acceleration: 21,
   deceleration: 15.5,
   turnRateRadiansPerSecond: 7.5,
+  turnDeceleration: 10.5,
   rotationSmoothing: 12,
   sprintStaminaCost: 0.13,
   staminaRecovery: 0.045,
@@ -63,6 +66,12 @@ export type MovementResult = {
   staminaBefore: number;
   staminaAfter: number;
   turnedByRadians: number;
+  /** Signed acceleration along the current travel direction. */
+  acceleration: number;
+  /** Ground distance travelled during this step. */
+  distanceTravelled: number;
+  /** True when the player is actively braking or turning against momentum. */
+  braking: boolean;
 };
 
 const EPSILON = 0.0001;
@@ -160,12 +169,13 @@ export function updatePlayerMovement({
   const currentSpeed = currentVelocity.length();
   let movementDirection = desiredDirection;
   let turnedByRadians = 0;
+  let requestedTurn = 0;
 
   if (hasInput && currentSpeed > EPSILON) {
     const currentDirection = currentVelocity.normalize();
     const currentAngle = Math.atan2(currentDirection.x, currentDirection.z);
     const desiredAngle = Math.atan2(desiredDirection!.x, desiredDirection!.z);
-    const requestedTurn = angleDifference(currentAngle, desiredAngle);
+    requestedTurn = angleDifference(currentAngle, desiredAngle);
     const maxTurn = config.turnRateRadiansPerSecond * safeDt;
     turnedByRadians = clamp(requestedTurn, -maxTurn, maxTurn);
     const limitedAngle = currentAngle + turnedByRadians;
@@ -180,9 +190,17 @@ export function updatePlayerMovement({
     movementDirection = currentVelocity.normalize();
   }
 
-  const nextSpeed = hasInput
+  const turnDemand = hasInput && currentSpeed > EPSILON
+    ? clamp(Math.abs(requestedTurn) / Math.PI, 0, 1)
+    : 0;
+  let nextSpeed = hasInput
     ? moveTowards(currentSpeed, maxSpeed, config.acceleration * safeDt)
     : moveTowards(currentSpeed, 0, config.deceleration * safeDt);
+  if (turnDemand > 0) {
+    nextSpeed = Math.max(0, nextSpeed - turnDemand * config.turnDeceleration * safeDt);
+  }
+  const acceleration = safeDt > EPSILON ? (nextSpeed - currentSpeed) / safeDt : 0;
+  const braking = currentSpeed > EPSILON && (!hasInput || (turnDemand > 0.12 && nextSpeed < currentSpeed));
 
   if (nextSpeed <= EPSILON) {
     player.velocity.set(0, 0, 0);
@@ -223,20 +241,11 @@ export function updatePlayerMovement({
     player.mesh.rotation.y = currentAngle + rotationStep;
   }
 
-  const currentTime = now ?? (typeof performance !== "undefined" ? performance.now() : 0);
-  const bob = Math.sin(currentTime * 0.012 + player.number) *
-    Math.min(nextSpeed * 0.018, 0.12);
-  player.mesh.position.set(player.position.x, bob, player.position.z);
-
-  if (previousPosition.distanceToSquared(player.position) > 0.0001) {
-    player.body.scale.y = 1 + Math.min(nextSpeed * 0.01, 0.08);
-  } else {
-    player.body.scale.y = THREE.MathUtils.lerp(
-      player.body.scale.y,
-      1,
-      clamp(safeDt * 8, 0, 1)
-    );
-  }
+  // Gameplay owns the root transform. Presentation may animate a child rig,
+  // but a frame clock must never bob or squash the collision body.
+  void now;
+  player.mesh.position.set(player.position.x, player.position.y, player.position.z);
+  player.body.scale.y = 1;
 
   return {
     speed: nextSpeed,
@@ -244,6 +253,9 @@ export function updatePlayerMovement({
     sprinting,
     staminaBefore,
     staminaAfter: player.stamina,
-    turnedByRadians
+    turnedByRadians,
+    acceleration,
+    distanceTravelled: previousPosition.distanceTo(player.position),
+    braking
   };
 }

@@ -24,6 +24,22 @@ export type DribblingConfig = {
   looseTouchDistance: number;
   /** Horizontal speed applied when the ball is nudged loose. */
   looseTouchSpeed: number;
+  /** Selects the legacy visual attachment or discrete physical touches. */
+  mode: "legacy-attachment" | "impulse";
+  /** Normal touch interval at walking speed. */
+  touchInterval: number;
+  /** Minimum interval while sprinting. */
+  sprintTouchInterval: number;
+  /** Fraction of the target correction converted into a touch impulse. */
+  touchCorrection: number;
+  /** Forward speed added by each controlled touch. */
+  touchForwardImpulse: number;
+  /** Maximum horizontal touch impulse for a single contact. */
+  maxTouchImpulse: number;
+  /** Additional horizontal distance a player can reach for a touch. */
+  touchReachMargin: number;
+  /** Per-touch loose-ball chance at the configured high-speed limit. */
+  touchLossPerContact: number;
 };
 
 export const DEFAULT_DRIBBLING_CONFIG: DribblingConfig = {
@@ -34,7 +50,15 @@ export const DEFAULT_DRIBBLING_CONFIG: DribblingConfig = {
   highSpeedThreshold: 8.8,
   sprintTouchRisk: 0.64,
   looseTouchDistance: 1.15,
-  looseTouchSpeed: 3.6
+  looseTouchSpeed: 3.6,
+  mode: "legacy-attachment",
+  touchInterval: 0.23,
+  sprintTouchInterval: 0.16,
+  touchCorrection: 0.68,
+  touchForwardImpulse: 1.05,
+  maxTouchImpulse: 12,
+  touchReachMargin: 0.92,
+  touchLossPerContact: 0.28
 };
 
 export type PlayerForwardResolver = (player: SimPlayer) => THREE.Vector3;
@@ -49,7 +73,18 @@ export type DribblingInput = {
   playerForward?: PlayerForwardResolver;
   /** Injected in tests/replays; defaults to Math.random in the live game. */
   random?: () => number;
+  /** Overrides config mode for an orchestrator migration step. */
+  mode?: DribblingConfig["mode"];
+  /** Simulation clock in seconds; physical touch cadence uses this value. */
+  now?: number;
+  /** Mutable cadence state owned by DribblingSystem or a replay harness. */
+  touchState?: DribbleTouchState;
   config?: Partial<DribblingConfig>;
+};
+
+export type DribbleTouchState = {
+  nextTouchAt: number;
+  touchCount: number;
 };
 
 export type DribblingResult = {
@@ -65,6 +100,17 @@ export type DribblingResult = {
   looseTouchRiskPerSecond: number;
   /** Probability used for this individual simulation step. */
   looseTouchChance: number;
+  /** Which attachment model produced this result. */
+  mode: DribblingConfig["mode"];
+  /** True only when this step applied a foot-to-ball impulse. */
+  touchApplied: boolean;
+  /** Physical impulse added to the ball on this touch, if any. */
+  touchImpulse: THREE.Vector3;
+  /** Cadence metadata for deterministic animation/contact synchronization. */
+  nextTouchAt: number;
+  touchCount: number;
+  /** In impulse mode the ball remains free between contacts. */
+  ballContinuesBetweenTouches: boolean;
 };
 
 /**
@@ -156,9 +202,10 @@ export function getDribbleAttachmentPoint(
 }
 
 /**
- * Updates the ball while `player` owns it. A loose touch is reported to the
- * caller instead of changing `player.hasBall`, because ownership is a match
- * concern and must be released through the existing possession path.
+ * Updates the ball while `player` owns it. In `legacy-attachment` mode this
+ * preserves the Phase 2 visual attachment for old callers. In `impulse` mode
+ * the system only applies a discrete touch impulse when the cadence is due;
+ * BallSystem remains responsible for moving the ball between contacts.
  */
 export function updateDribbling({
   player,
@@ -168,9 +215,13 @@ export function updateDribbling({
   isSprinting,
   playerForward,
   random = Math.random,
+  mode,
+  now = 0,
+  touchState,
   config: configOverrides
 }: DribblingInput): DribblingResult {
   const config = mergeConfig(configOverrides);
+  const resolvedMode = mode ?? config.mode;
   const safeDt = Math.max(0, Math.min(dt, 0.25));
   const sprinting = Boolean(sprint ?? isSprinting);
   const dribbling = normalizeStat(player.stats.dribbling);
@@ -190,7 +241,13 @@ export function updateDribbling({
       attachmentPoint,
       looseTouchRisk: 0,
       looseTouchRiskPerSecond: 0,
-      looseTouchChance: 0
+      looseTouchChance: 0,
+      mode: resolvedMode,
+      touchApplied: false,
+      touchImpulse: new THREE.Vector3(),
+      nextTouchAt: touchState?.nextTouchAt ?? now,
+      touchCount: touchState?.touchCount ?? 0,
+      ballContinuesBetweenTouches: resolvedMode === "impulse"
     };
   }
 
@@ -202,21 +259,70 @@ export function updateDribbling({
   const looseTouchRisk = sprinting
     ? clamp(speedRisk * config.sprintTouchRisk * (1 - dribbling * 0.72), 0, 0.98)
     : 0;
-  // Convert a per-second hazard into a frame-rate-independent per-step
-  // probability. Over one second, N steps produce approximately the same
-  // aggregate chance regardless of whether N is 30, 60, or 120.
-  const looseTouchChance = safeDt > 0
+  const interval = sprinting ? config.sprintTouchInterval : config.touchInterval;
+  const state = touchState ?? { nextTouchAt: now, touchCount: 0 };
+  if (!Number.isFinite(state.nextTouchAt)) state.nextTouchAt = now;
+  const touchDue = resolvedMode === "impulse" && now + safeDt * 0.5 >= state.nextTouchAt;
+  const horizontalBallOffset = ball.position.clone().sub(player.position);
+  horizontalBallOffset.y = 0;
+  const maxReach = controlDistance + config.touchReachMargin;
+  const ballInReach = horizontalBallOffset.length() <= maxReach;
+  // Legacy mode retains a frame-rate-independent hazard for old orchestrators.
+  const legacyLooseTouchChance = safeDt > 0
     ? 1 - Math.pow(1 - looseTouchRisk, safeDt)
     : 0;
+  const contactLossChance = clamp(
+    looseTouchRisk * config.touchLossPerContact * (sprinting ? 1 : 0.18),
+    0,
+    0.98
+  );
+  const looseTouchChance = resolvedMode === "impulse"
+    ? (touchDue ? contactLossChance : 0)
+    : legacyLooseTouchChance;
   const roll = looseTouchChance > 0 ? clamp(random(), 0, 1) : 1;
-  const looseTouch = roll < looseTouchChance;
+  const looseTouch = roll < looseTouchChance || (resolvedMode === "impulse" && !ballInReach);
   const touchQuality = clamp(
     1 - looseTouchRisk * 0.8 - (1 - dribbling) * 0.16,
     0,
     1
   );
 
-  if (looseTouch) {
+  let touchApplied = false;
+  const touchImpulse = new THREE.Vector3();
+  if (resolvedMode === "impulse") {
+    if (touchDue && ballInReach && !looseTouch) {
+      touchApplied = true;
+      state.touchCount += 1;
+      const target = attachmentPoint.clone();
+      const delta = target.sub(ball.position);
+      delta.y = 0;
+      // Use the fixed touch interval rather than the physics step. This keeps
+      // a contact's impulse stable at 30/60/120 Hz and avoids frame-rate
+      // dependent bursts when a coarse step happens to hit the cadence.
+      const correction = interval > EPSILON
+        ? delta.multiplyScalar(config.touchCorrection / interval)
+        : new THREE.Vector3();
+      const desiredForward = forward.clone().multiplyScalar(
+        config.touchForwardImpulse + speed * (sprinting ? 1.02 : 0.94)
+      );
+      const desiredVelocity = correction.add(desiredForward);
+      // Resolve toward a bounded desired velocity instead of stacking a new
+      // impulse on an already moving ball every contact.
+      touchImpulse.copy(desiredVelocity).sub(ball.velocity);
+      touchImpulse.y = 0;
+      if (touchImpulse.length() > config.maxTouchImpulse) touchImpulse.setLength(config.maxTouchImpulse);
+      ball.velocity.add(touchImpulse);
+      // A controlled touch rolls the ball with the foot, while a high-speed
+      // loss keeps the impulse visible and lets possession resolve later.
+      if (ball.spin) {
+        const lateral = new THREE.Vector3(forward.z, 0, -forward.x);
+        ball.spin.y = touchImpulse.dot(lateral) * 0.1;
+      }
+      state.nextTouchAt = now + Math.max(0.08, interval);
+    }
+  }
+
+  if (resolvedMode === "legacy-attachment" && looseTouch) {
     const side = rightFromForward(forward);
     // Reuse the detection sample for the lateral nudge. This keeps one random
     // sample per simulation step, which is useful for deterministic replays.
@@ -231,14 +337,14 @@ export function updateDribbling({
     ball.velocity.copy(forward).multiplyScalar(
       Math.max(config.looseTouchSpeed, speed * (0.22 + looseTouchRisk * 0.18))
     );
-  } else {
+  } else if (resolvedMode === "legacy-attachment") {
     ball.position.lerp(
       attachmentPoint,
       clamp(safeDt * config.controlLerpRate, 0, 1)
     );
     ball.velocity.set(0, 0, 0);
   }
-  ball.mesh.position.copy(ball.position);
+  if (resolvedMode === "legacy-attachment") ball.mesh.position.copy(ball.position);
 
   return {
     attached: true,
@@ -249,7 +355,13 @@ export function updateDribbling({
     attachmentPoint,
     looseTouchRisk,
     looseTouchRiskPerSecond: looseTouchRisk,
-    looseTouchChance
+    looseTouchChance,
+    mode: resolvedMode,
+    touchApplied,
+    touchImpulse,
+    nextTouchAt: state.nextTouchAt,
+    touchCount: state.touchCount,
+    ballContinuesBetweenTouches: resolvedMode === "impulse"
   };
 }
 
@@ -284,13 +396,22 @@ export function getShieldingPlaceholder({
 
 export class DribblingSystem {
   readonly config: DribblingConfig;
+  private readonly touchStates = new Map<string, DribbleTouchState>();
 
   constructor(config: Partial<DribblingConfig> = {}) {
     this.config = mergeConfig(config);
   }
 
   update(input: Omit<DribblingInput, "config">): DribblingResult {
-    return updateDribbling({ ...input, config: this.config });
+    const state = input.touchState ?? this.touchStates.get(input.player.id) ?? { nextTouchAt: input.now ?? 0, touchCount: 0 };
+    const result = updateDribbling({ ...input, touchState: state, config: this.config });
+    this.touchStates.set(input.player.id, state);
+    return result;
+  }
+
+  reset(playerId?: string) {
+    if (playerId) this.touchStates.delete(playerId);
+    else this.touchStates.clear();
   }
 
   attachmentPoint(

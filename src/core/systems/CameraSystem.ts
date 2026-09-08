@@ -12,6 +12,7 @@ export type CameraFramingLimits = {
 };
 
 export type CameraBroadcastPreset = {
+  /** Legacy scale terms remain in the contract for saved overrides. */
   height: number;
   xScale: number;
   zScale: number;
@@ -20,6 +21,11 @@ export type CameraBroadcastPreset = {
   activeWeight: number;
   lookAheadZ: number;
   smoothing: number;
+  /** Sideline broadcast placement and anticipatory framing. */
+  sidelineX: number;
+  sidelineHeight: number;
+  sidelineDistance: number;
+  anticipation: number;
 };
 
 export type CameraFollowPreset = {
@@ -50,14 +56,20 @@ export type CameraFeelConfigOverrides = {
 
 export const DEFAULT_CAMERA_CONFIG: Readonly<CameraFeelConfig> = Object.freeze({
   broadcast: Object.freeze({
-    height: 92,
+    // A high sideline position keeps the pitch length running across the
+    // screen while retaining a readable ball and passing lanes.
+    height: 44,
     xScale: 0.28,
     zScale: 0.42,
     zOffset: -38,
     ballWeight: 0.72,
     activeWeight: 0.28,
-    lookAheadZ: 12,
-    smoothing: 2.8
+    lookAheadZ: 8,
+    smoothing: 3.8,
+    sidelineX: 58,
+    sidelineHeight: 31,
+    sidelineDistance: 10,
+    anticipation: 0.42
   }),
   follow: Object.freeze({
     distance: 11,
@@ -70,12 +82,12 @@ export const DEFAULT_CAMERA_CONFIG: Readonly<CameraFeelConfig> = Object.freeze({
   // stadium floor. They are configurable for smaller mobile layouts and
   // future indoor venues.
   framing: Object.freeze({
-    minX: -30,
-    maxX: 30,
+    minX: -84,
+    maxX: 84,
     minY: 5,
-    maxY: 110,
+    maxY: 120,
     minZ: -82,
-    maxZ: 66
+    maxZ: 82
   }),
   goalEmphasis: Object.freeze({
     duration: 0.9,
@@ -166,15 +178,25 @@ export function getCameraTargets(
 
   if (mode === "broadcast") {
     const preset = resolved.broadcast;
+    const ballWeight = THREE.MathUtils.clamp(preset.ballWeight, 0, 1);
+    const activeWeight = THREE.MathUtils.clamp(preset.activeWeight, 0, 1);
+    const focusZ = ball.position.z * ballWeight + activePlayer.position.z * activeWeight;
+    const velocityLead = Number.isFinite(ball.velocity.z)
+      ? THREE.MathUtils.clamp(ball.velocity.z * 0.22, -6, 6)
+      : 0;
+    const anticipation = THREE.MathUtils.clamp(preset.anticipation, 0, 1);
+    const lookAhead = preset.lookAheadZ + velocityLead * anticipation;
     const position = new THREE.Vector3(
-      ball.position.x * preset.xScale,
-      preset.height,
-      ball.position.z * preset.zScale + preset.zOffset
+      preset.sidelineX,
+      preset.sidelineHeight,
+      // The camera stays on the same sideline when possession changes. Only
+      // the bounded tracking focus moves along the pitch length.
+      focusZ - preset.sidelineDistance
     );
     const lookAt = new THREE.Vector3(
-      ball.position.x * preset.ballWeight + activePlayer.position.x * preset.activeWeight,
-      1.8,
-      ball.position.z * preset.ballWeight + activePlayer.position.z * preset.activeWeight + preset.lookAheadZ
+      ball.position.x * ballWeight + activePlayer.position.x * activeWeight,
+      2.2,
+      focusZ + lookAhead
     );
     return { position: clampCameraPosition(position, resolved.framing), lookAt, smoothing: preset.smoothing };
   }

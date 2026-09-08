@@ -35,6 +35,10 @@ export type PlayerCard = {
   positions: SquadRole[];
   rarity: CardRarity;
   attributes: PlayerAttributes;
+  /** Match presentation/gameplay metadata; older cards use safe defaults. */
+  preferredFoot?: "left" | "right";
+  heightScale?: number;
+  weightScale?: number;
 };
 
 export type FormationSlot = {
@@ -119,4 +123,7 @@ export type MatchTeamPlayerData = {
   number: number;
   formation: { x: number; z: number };
   stats: PlayerAttributes;
+  preferredFoot?: "left" | "right";
+  heightScale?: number;
+  weightScale?: number;
 };

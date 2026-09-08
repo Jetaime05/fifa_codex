@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { calculatePassStrength, createPassPlan, executePass } from "./PassingSystem";
+import { updateBallPhysics } from "./BallSystem";
 import type { SimBall, SimPlayer } from "./types";
 
 const player = (
@@ -88,5 +89,28 @@ describe("PassingSystem", () => {
     expect(pressured!.trajectory.target.x).not.toBe(clean!.trajectory.target.x);
     expect(pressured!.feedback.pressure).toBe(1);
     expect(pressured!.feedback.effect).toBe("pass-risk");
+  });
+
+  it("keeps an unopposed moving-receiver ETA consistent with BallSystem drag", () => {
+    const passer = player("home-passer", "home", 0, 0);
+    const receiver = player("home-runner", "home", 0, 18, {
+      velocity: new THREE.Vector3(0, 0, 2.2), role: "FWD"
+    });
+    const kicked = ball();
+    kicked.position.y = 0.22;
+    const plan = createPassPlan({ passer, teammates: [receiver], opponents: [], ball: kicked, assist: 1, random: () => 0.5 });
+    expect(plan).not.toBeNull();
+    kicked.velocity.copy(plan!.trajectory.velocity);
+    const total = plan!.trajectory.travelTime;
+    for (let elapsed = 0; elapsed < total; elapsed += 1 / 120) {
+      receiver.position.addScaledVector(receiver.velocity, Math.min(1 / 120, total - elapsed));
+      updateBallPhysics({
+        ball: kicked, ballOwner: null, dt: Math.min(1 / 120, total - elapsed),
+        bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.22, goalWidth: 13.5,
+        playerForward: () => new THREE.Vector3(0, 0, 1), onGoal: () => undefined
+      });
+    }
+    expect(kicked.position.distanceTo(plan!.trajectory.target)).toBeLessThan(1.5);
+    expect(kicked.velocity.length()).toBeLessThan(plan!.strength);
   });
 });

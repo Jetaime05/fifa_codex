@@ -83,6 +83,8 @@ describe("MovementSystem", () => {
     );
 
     expect(result.turnedByRadians).toBeCloseTo(0.2);
+    expect(result.braking).toBe(true);
+    expect(result.acceleration).toBeLessThan(0);
     expect(Math.atan2(player.velocity.x, player.velocity.z)).toBeCloseTo(0.2);
     // Rotation follows the same shortest path and never snaps to 90°.
     expect(player.mesh.rotation.y).toBeGreaterThan(0);
@@ -120,4 +122,3 @@ describe("MovementSystem", () => {
     expect(high.position.z).toBeLessThanOrEqual(bounds.halfLength - 0.75);
   });
 });
-

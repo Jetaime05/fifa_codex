@@ -11,6 +11,8 @@ export type PlayerStats = {
   physical: number;
 };
 
+export type PreferredFoot = "left" | "right";
+
 export type FormationSlot = {
   x: number;
   z: number;
@@ -23,6 +25,11 @@ export type PlayerData = {
   number: number;
   formation: FormationSlot;
   stats: PlayerStats;
+  /** Optional realism metadata; legacy squad data defaults to right-footed. */
+  preferredFoot?: PreferredFoot;
+  /** Small body variation in the existing world-unit scale. */
+  heightScale?: number;
+  weightScale?: number;
 };
 
 export type TeamData = {

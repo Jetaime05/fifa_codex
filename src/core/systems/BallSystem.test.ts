@@ -113,4 +113,36 @@ describe("BallSystem trajectory compatibility", () => {
     expect(paused).toBe(true);
     expect(count).toBe(1);
   });
+
+  it("sweeps a high-speed ball into a post and reflects from the first surface", () => {
+    const ball = makeBall();
+    ball.position.set(-2, 0.55, 0);
+    ball.velocity.set(300, 0, 0);
+    const result = updateBallPhysics({
+      ball, ballOwner: null, dt: 1 / 60,
+      bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+      playerForward: () => new THREE.Vector3(1, 0, 0), onGoal: () => undefined,
+      collisionHooks: { posts: [new THREE.Vector3(0, 0.55, 0)], postRadius: 0.14 }
+    });
+    expect(result.collisions[0]?.kind).toBe("post");
+    expect(ball.velocity.x).toBeLessThan(0);
+    expect(ball.position.x).toBeLessThan(-0.55);
+    expect([...ball.position.toArray(), ...ball.velocity.toArray()].every(Number.isFinite)).toBe(true);
+  });
+
+  it("detects a grazing capsule/body contact with the same swept path", () => {
+    const ball = makeBall();
+    ball.position.set(-2, 0.8, 0.6);
+    ball.velocity.set(240, 0, 0);
+    const result = updateBallPhysics({
+      ball, ballOwner: null, dt: 1 / 60,
+      bounds: { halfWidth: 36, halfLength: 56 }, ballRadius: 0.55, goalWidth: 13.5,
+      playerForward: () => new THREE.Vector3(1, 0, 0), onGoal: () => undefined,
+      collisionHooks: { bodies: [{ id: "away-7", position: new THREE.Vector3(0, 0, 0), radius: 0.42, height: 1.8 }] }
+    });
+    expect(result.collisions.some((collision) => collision.kind === "body")).toBe(true);
+    expect(ball.velocity.x).toBeGreaterThan(0);
+    expect(ball.velocity.x).toBeLessThan(240);
+    expect(ball.velocity.z).toBeGreaterThan(0);
+  });
 });

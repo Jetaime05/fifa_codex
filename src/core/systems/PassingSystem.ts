@@ -4,6 +4,7 @@ import {
   DEFAULT_PASSING_CONFIG,
   type PassingConfig
 } from "./GameplayConfig";
+import { DEFAULT_BALL_PHYSICS_CONFIG } from "./GameplayConfig";
 import {
   distanceToPassLane,
   rankPassTargets,
@@ -17,7 +18,7 @@ const neutralRandom: RandomRange = (min, max) => (min + max) * 0.5;
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
-export type PassStyle = "ground";
+export type PassStyle = "ground" | "through" | "lob" | "cross";
 
 export type PassInterceptionThreat = {
   defenderId: string;
@@ -69,7 +70,7 @@ export type PassFeedbackEvent = {
 };
 
 export type GroundPassTrajectory = {
-  style: "ground";
+  style: "ground" | "through";
   origin: THREE.Vector3;
   target: THREE.Vector3;
   direction: THREE.Vector3;
@@ -78,6 +79,20 @@ export type GroundPassTrajectory = {
   lift: number;
   leadDistance: number;
 };
+
+export type AerialPassTrajectory = {
+  style: "lob" | "cross";
+  origin: THREE.Vector3;
+  target: THREE.Vector3;
+  direction: THREE.Vector3;
+  velocity: THREE.Vector3;
+  travelTime: number;
+  lift: number;
+  leadDistance: number;
+  apexHeight: number;
+};
+
+export type PassTrajectory = GroundPassTrajectory | AerialPassTrajectory;
 
 export type PassPlan = {
   style: PassStyle;
@@ -90,7 +105,7 @@ export type PassPlan = {
   strength: number;
   assist: number;
   pressure: number;
-  trajectory: GroundPassTrajectory;
+  trajectory: PassTrajectory;
   interception: PassInterceptionWindow;
   feedback: PassFeedbackEvent;
 };
@@ -109,6 +124,8 @@ export type PassingInput = {
   intendedTarget?: SimPlayer | null;
   /** Stick/aim direction used by target selection when no target is locked. */
   desiredDirection?: THREE.Vector3;
+  /** Ground by default; through/lob/cross share target selection and interception math. */
+  style?: PassStyle;
   assist?: number;
   /** 0..1. If omitted, infer it from the nearest opponent. */
   pressure?: number;
@@ -220,11 +237,18 @@ export function createPassPlan(input: PassingInput): PassPlan | null {
   const resolved = resolveTarget(input, assist);
   if (!resolved.target) return null;
   const target = resolved.target;
+  const style = input.style ?? "ground";
   const initialDistance = Math.max(horizontalDistance(origin, target.position), 0.05);
   const initialStrength = calculatePassStrength(initialDistance, input.passer.stats.passing, config);
-  const initialTravelTime = initialDistance / Math.max(initialStrength, 0.1);
+  const initialFlightTime = style === "ground" || style === "through"
+    ? initialDistance / Math.max(initialStrength, 0.1)
+    : Math.max(0.55, initialDistance / Math.max(config.aerialMaxSpeed, 0.1));
   const requestedTarget = target.position.clone().add(
-    target.velocity.clone().multiplyScalar(initialTravelTime * clamp(config.targetLead, 0, 1.5))
+    target.velocity.clone().multiplyScalar(initialFlightTime * clamp(
+      style === "through" ? config.throughLead : config.targetLead,
+      0,
+      1.8
+    ))
   );
   requestedTarget.y = origin.y;
 
@@ -243,27 +267,83 @@ export function createPassPlan(input: PassingInput): PassPlan | null {
   const finalLine = new THREE.Vector3(finalTarget.x - origin.x, 0, finalTarget.z - origin.z);
   const finalDistance = Math.max(finalLine.length(), 0.05);
   const finalDirection = finalLine.normalize();
-  const lift = clamp(config.groundLift + pressure * 0.035, 0, config.maxGroundLift);
-  const velocity = finalDirection.clone().multiplyScalar(strength);
-  velocity.y = lift;
-  const travelTime = finalDistance / Math.max(strength, 0.1);
-  const trajectory: GroundPassTrajectory = {
-    style: "ground",
-    origin: origin.clone(),
-    target: finalTarget.clone(),
-    direction: finalDirection.clone(),
-    velocity: velocity.clone(),
-    travelTime,
-    lift,
-    leadDistance: horizontalDistance(target.position, requestedTarget)
-  };
+  const leadDistance = horizontalDistance(target.position, requestedTarget);
+  let releaseStrength = strength;
+  let trajectory: PassTrajectory;
+  if (style === "ground" || style === "through") {
+    const lift = style === "through"
+      ? clamp(config.throughLift + pressure * 0.035, 0, config.maxGroundLift)
+      : clamp(config.groundLift + pressure * 0.035, 0, config.maxGroundLift);
+    // BallSystem applies exponential ground drag. Solve the release velocity
+    // for the same travel ETA used by interception prediction so long passes
+    // arrive near their planned target instead of dying short.
+    const nominalTravelTime = finalDistance / Math.max(strength, 0.1);
+    const dragRate = Math.max(0, config.groundDragPerSecond);
+    const gravity = DEFAULT_BALL_PHYSICS_CONFIG.gravity;
+    const launchHeight = Math.max(0, origin.y - DEFAULT_BALL_PHYSICS_CONFIG.radius);
+    const discriminant = 0.12 * 0.12 + 2 * gravity * launchHeight;
+    const airTime = discriminant > 0 ? (0.12 + Math.sqrt(discriminant)) / gravity : 0;
+    const airDrag = DEFAULT_BALL_PHYSICS_CONFIG.airDragPerSecond;
+    const airDistanceFactor = airDrag > 0.0001
+      ? (1 - Math.exp(-airDrag * airTime)) / airDrag
+      : airTime;
+    const groundDuration = Math.max(0, nominalTravelTime - airTime);
+    const groundDistanceFactor = dragRate > 0.0001
+      ? Math.exp(-airDrag * airTime) * (1 - Math.exp(-dragRate * groundDuration)) / dragRate
+      : groundDuration * Math.exp(-airDrag * airTime);
+    const distanceFactor = Math.max(0.05, airDistanceFactor + groundDistanceFactor);
+    const unconstrainedSpeed = finalDistance / distanceFactor;
+    const physicalSpeed = clamp(unconstrainedSpeed, config.minSpeed, config.maxSpeed);
+    releaseStrength = physicalSpeed;
+    const travelTime = nominalTravelTime;
+    const velocity = finalDirection.clone().multiplyScalar(physicalSpeed);
+    velocity.y = lift;
+    trajectory = {
+      style,
+      origin: origin.clone(),
+      target: finalTarget.clone(),
+      direction: finalDirection.clone(),
+      velocity: velocity.clone(),
+      travelTime,
+      lift,
+      leadDistance
+    };
+  } else {
+    const gravity = DEFAULT_BALL_PHYSICS_CONFIG.gravity;
+    const desiredApex = style === "lob" ? config.lobApexHeight : config.crossApexHeight;
+    const apexTime = Math.sqrt(Math.max(0.01, desiredApex * 2 / gravity));
+    let travelTime = Math.max(apexTime * 2, finalDistance / Math.max(config.aerialMaxSpeed, 0.1));
+    let lift = gravity * travelTime * 0.5;
+    let horizontalSpeed = finalDistance / Math.max(travelTime, 0.1);
+    if (horizontalSpeed < config.aerialMinSpeed) {
+      horizontalSpeed = config.aerialMinSpeed;
+      travelTime = finalDistance / Math.max(horizontalSpeed, 0.1);
+      lift = gravity * travelTime * 0.5;
+    }
+    const velocity = finalDirection.clone().multiplyScalar(horizontalSpeed);
+    releaseStrength = horizontalSpeed;
+    velocity.y = lift;
+    trajectory = {
+      style,
+      origin: origin.clone(),
+      target: finalTarget.clone(),
+      direction: finalDirection.clone(),
+      velocity: velocity.clone(),
+      travelTime,
+      lift,
+      leadDistance,
+      apexHeight: lift * lift / (2 * gravity)
+    };
+  }
   const interception = calculatePassInterceptionWindow({
     origin,
     target: finalTarget,
-    velocity,
+    velocity: trajectory.velocity,
     opponents,
     corridorWidth: config.interceptionCorridor,
-    reactionTime: config.interceptionReactionTime
+    reactionTime: config.interceptionReactionTime,
+    dragPerSecond: style === "ground" || style === "through" ? config.groundDragPerSecond : DEFAULT_BALL_PHYSICS_CONFIG.airDragPerSecond,
+    travelTime: trajectory.travelTime
   });
   const feedback: PassFeedbackEvent = {
     type: "pass",
@@ -271,9 +351,9 @@ export function createPassPlan(input: PassingInput): PassPlan | null {
     effect: interception.interceptable || pressure > 0.65 ? "pass-risk" : "pass-release",
     passerId: input.passer.id,
     targetId: target.id,
-    style: "ground",
+    style,
     distance: finalDistance,
-    strength,
+    strength: releaseStrength,
     assist,
     pressure,
     interceptionRisk: Math.max(interception.risk, pressure * 0.45),
@@ -282,14 +362,14 @@ export function createPassPlan(input: PassingInput): PassPlan | null {
     position: origin.clone()
   };
   return {
-    style: "ground",
+    style,
     passer: input.passer,
     target,
     targetScore: resolved.score,
     origin: origin.clone(),
     requestedTarget: finalTarget.clone(),
     distance: finalDistance,
-    strength,
+    strength: releaseStrength,
     assist,
     pressure,
     trajectory,
@@ -307,6 +387,10 @@ export type PassInterceptionInput = {
   opponents: readonly SimPlayer[];
   corridorWidth?: number;
   reactionTime?: number;
+  /** Horizontal drag rate used by the physical trajectory (0 for air-only). */
+  dragPerSecond?: number;
+  /** Planned ETA already accounting for lift and ground contact. */
+  travelTime?: number;
 };
 
 /**
@@ -320,7 +404,12 @@ export function calculatePassInterceptionWindow(input: PassInterceptionInput): P
   const horizontal = new THREE.Vector3(input.target.x - input.origin.x, 0, input.target.z - input.origin.z);
   const distance = horizontal.length();
   const speed = Math.max(Math.hypot(input.velocity.x, input.velocity.z), 0.1);
-  const totalTime = distance / speed;
+  const dragRate = Math.max(0, input.dragPerSecond ?? 0);
+  const totalTime = input.travelTime !== undefined
+    ? Math.max(0, input.travelTime)
+    : dragRate > 0.0001 && distance * dragRate < speed * 0.98
+    ? -Math.log(Math.max(0.02, 1 - distance * dragRate / speed)) / dragRate
+    : distance / speed;
   const threats: PassInterceptionThreat[] = [];
   for (const defender of input.opponents) {
     const progress = distance < 0.000001

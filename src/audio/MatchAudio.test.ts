@@ -144,6 +144,19 @@ describe("MatchAudio", () => {
     expect(audio.play("kick")).toBe(false);
   });
 
+  it("varies event strength and distance without affecting the opt-in mixer contract", async () => {
+    const mock = fakeContext();
+    const audio = new MatchAudio({ contextFactory: mock.factory });
+    await audio.enable();
+    expect(audio.playEvent("kick", { strength: 1.5, distance: 0 })).toBe(true);
+    const near = mock.gains[mock.gains.length - 1].gain.linearRampToValueAtTime.mock.calls[0][0];
+    mock.context.currentTime += 1;
+    expect(audio.playEvent("kick", { strength: 0.5, distance: 70 })).toBe(true);
+    const far = mock.gains[mock.gains.length - 1].gain.linearRampToValueAtTime.mock.calls[0][0];
+    expect(near).toBeGreaterThan(far);
+    expect(audio.debugSnapshot().played).toBe(2);
+  });
+
   it("does not retrigger envelopes when frame updates repeat the same state", async () => {
     const mock = fakeContext();
     const audio = new MatchAudio({ contextFactory: mock.factory });

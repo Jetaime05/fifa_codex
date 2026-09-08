@@ -2,6 +2,8 @@ import * as THREE from "three";
 import type { TeamData, TeamId } from "../../data/types";
 import type { FieldBounds, SimBall, SimPlayer } from "./types";
 import { updatePlayerMovement } from "./MovementSystem";
+import { DEFAULT_MOVEMENT_CONFIG } from "./MovementSystem";
+import { DEFAULT_BALL_PHYSICS_CONFIG } from "./GameplayConfig";
 import { getGoalkeeperTargetPosition, type GoalkeeperConfig } from "./GoalkeeperSystem";
 import { decideUtilityAI } from "./UtilityAISystem";
 import { getAIDifficulty, type AIDifficultyLevel } from "./AIDifficulty";
@@ -14,6 +16,12 @@ export type AIContext = {
   players: SimPlayer[]; ball: SimBall; ballOwner: SimPlayer | null; activePlayer: SimPlayer | null;
   teams: Record<TeamId, TeamData>; bounds: FieldBounds; playerRadius: number; dt: number;
   random: (min: number, max: number) => number;
+  /**
+   * Short lived intent created at pass release. The receiver gets an explicit
+   * intercept target so support movement does not immediately pull them back
+   * toward their shape anchor while the ball is travelling.
+   */
+  passIntent?: PassReceiverIntent | null;
   /** Optional Phase 6D runtime tactics keyed by team; omitted preserves Phase 3 behavior. */
   tactics?: RuntimeTeamTacticsByTeam;
   goalkeeperConfig?: Partial<GoalkeeperConfig>;
@@ -25,6 +33,15 @@ export type AIContext = {
   onShoot?: (player: SimPlayer) => void;
   onClear?: (player: SimPlayer) => void;
   onTackle?: (player: SimPlayer) => void;
+};
+
+export type PassReceiverIntent = {
+  passerId: string;
+  receiverId: string;
+  team: TeamId;
+  /** Optional snapshot for replay/debug consumers; live interception uses ball velocity. */
+  targetPosition?: THREE.Vector3;
+  expiresAtMs?: number;
 };
 export type AIRuntimeDecision = AIDecisionResult & {
   target: { x: number; y: number; z: number }; passTargetId?: string;
@@ -81,6 +98,48 @@ export class FootballAISystem {
     if (ownerId !== this.possession || (activePlayer?.id ?? null) !== this.activePlayerId) this.memory.clear();
     this.possession = ownerId; this.activePlayerId = activePlayer?.id ?? null;
     const plans = planBothTeamsSpatialAI({ players, ballPosition: ball.position, ballOwner, teams, bounds, tactics: context.tactics });
+    const passReceiver = context.passIntent && context.passIntent.expiresAtMs !== undefined &&
+      this.nowMs > context.passIntent.expiresAtMs
+      ? null
+      : context.passIntent
+        ? players.find((player) => player.id === context.passIntent!.receiverId && player.team === context.passIntent!.team)
+        : null;
+    const passReceiverTarget = passReceiver && !ballOwner
+      ? (() => {
+        const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+        // A stationary or nearly settled ball is a collection target. Using
+        // the receiver position here made a receiver keep running away from a
+        // ball that was already within playing distance.
+        if (ballSpeed <= 0.4) return ball.position.clone().setY(0);
+        // Search the same exponential trajectory used by BallSystem. Ground
+        // passes use rolling friction; aerial actions use air drag. Adding
+        // receiver velocity to the target itself used to steer it away from
+        // the ball's actual path.
+        const grounded = ball.position.y <= DEFAULT_BALL_PHYSICS_CONFIG.radius + 0.08 && Math.abs(ball.velocity.y) < 0.9;
+        const dragRate = grounded
+          ? DEFAULT_BALL_PHYSICS_CONFIG.groundFrictionPerSecond
+          : DEFAULT_BALL_PHYSICS_CONFIG.airDragPerSecond;
+        const baseSpeed = DEFAULT_MOVEMENT_CONFIG.walkSpeedBase + passReceiver.stats.pace * DEFAULT_MOVEMENT_CONFIG.paceSpeedScale;
+        const staminaMultiplier = passReceiver.stamina < DEFAULT_MOVEMENT_CONFIG.minSprintStamina
+          ? DEFAULT_MOVEMENT_CONFIG.exhaustedSprintMultiplier
+          : 1;
+        const maxSpeed = baseSpeed * DEFAULT_MOVEMENT_CONFIG.sprintMultiplier * staminaMultiplier;
+        let best: { point: THREE.Vector3; score: number } | null = null;
+        for (let time = 0.06; time <= 1.2; time += 0.06) {
+          const travelScale = (1 - Math.exp(-dragRate * time)) / dragRate;
+          const point = ball.position.clone().addScaledVector(ball.velocity, travelScale);
+          point.y = 0;
+          point.x = THREE.MathUtils.clamp(point.x, -bounds.halfWidth + 1.2, bounds.halfWidth - 1.2);
+          point.z = THREE.MathUtils.clamp(point.z, -bounds.halfLength + 1.2, bounds.halfLength - 1.2);
+          const reachableAt = passReceiver.position.distanceTo(point) / Math.max(maxSpeed, 0.1);
+          const latePenalty = Math.max(0, reachableAt - time) * 3.5;
+          const score = Math.abs(reachableAt - time) + latePenalty;
+          if (!best || score < best.score) best = { point, score };
+          if (reachableAt <= time + 0.05) break;
+        }
+        return best?.point ?? ball.position.clone().setY(0);
+      })()
+      : null;
     const difficulty = getAIDifficulty(this.difficulty);
     // Reserve AI pressing slots independently of the controlled player. Always
     // send one recovery player even when a loose ball is outside press range.
@@ -120,6 +179,15 @@ export class FootballAISystem {
       let target = spatial.target.clone();
       let sprint = spatial.sprint;
       player.intent = spatial.intent;
+      const isPassReceiver = Boolean(passReceiver && player.id === passReceiver.id && passReceiverTarget);
+      if (isPassReceiver) {
+        // Receiver movement is a short lived action and should not be hidden
+        // by a stale shape target, but keep its utility memory intact so the
+        // normal reaction delay is not re-rolled every simulation step.
+        target.copy(passReceiverTarget!);
+        sprint = true;
+        player.intent = "chase";
+      }
       if (player.role === "GK") {
         target = getGoalkeeperTargetPosition({ keeper: player, ball, bounds, config: context.goalkeeperConfig });
         if (ballOwner === player && player.cooldown <= 0 && !actionDispatched && context.onPass) {
@@ -138,12 +206,10 @@ export class FootballAISystem {
             maxPassDistance: 35 * playerTacticalModifiers!.passDistanceMultiplier
           }
           : undefined;
-        const tacticalTeammates = playerTactics
-          ? teammates.map((teammate) => {
-            const shapeTarget = plans[player.team].shape.targets.find((target) => target.playerId === teammate.id);
-            return shapeTarget ? { ...teammate, position: shapeTarget.position.clone() } : teammate;
-          })
-          : teammates;
+        // Pass scoring must use the same live teammate position that the pass
+        // executor will receive. Substituting future shape anchors here made
+        // AI select a target in one location and release toward another.
+        const tacticalTeammates = teammates;
         let memory = this.memory.get(player.id);
         if (!memory || this.nowMs >= memory.decision.nextDecisionAtMs) {
           const direction = teams[player.team].attackingDirection;
@@ -186,7 +252,7 @@ export class FootballAISystem {
         }
         const { decision } = memory;
         if (ballOwner === player) target.copy(memory.target);
-        else memory.target.copy(target);
+        else if (!isPassReceiver) memory.target.copy(target);
         if (ballOwner === player) { player.intent = decision.action === "hold" ? "hold" : "support"; sprint = decision.action === "dribble"; }
         if (!memory.executed && this.nowMs >= decision.executeAtMs) {
           const action = decision.action;

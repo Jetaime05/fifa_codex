@@ -10,7 +10,7 @@ import {
   switchCameraMode
 } from "./core/match/MatchState";
 import type { CameraMode } from "./core/match/MatchState";
-import { kickBall, updateBallPhysics } from "./core/systems/BallSystem";
+import { applyBallTrajectory, kickBall, updateBallPhysics } from "./core/systems/BallSystem";
 import { separatePlayers as separatePlayerCollisions } from "./core/systems/CollisionSystem";
 import { DEFAULT_MOVEMENT_CONFIG, updatePlayerMovement as updateMovementSystem } from "./core/systems/MovementSystem";
 import type { MovementResult } from "./core/systems/MovementSystem";
@@ -33,15 +33,20 @@ import { DribblingSystem } from "./core/systems/DribblingSystem";
 import type { DribblingResult } from "./core/systems/DribblingSystem";
 import { FirstTouchSystem } from "./core/systems/FirstTouchSystem";
 import type { FirstTouchResult } from "./core/systems/FirstTouchSystem";
-import { executePass } from "./core/systems/PassingSystem";
-import type { PassFeedbackEvent, PassPlan } from "./core/systems/PassingSystem";
-import { executeShot } from "./core/systems/ShootingSystem";
+import { applyPassPlan, createPassPlan } from "./core/systems/PassingSystem";
+import type { PassFeedbackEvent, PassPlan, PassStyle } from "./core/systems/PassingSystem";
+import { applyShotPlan, createShotPlan } from "./core/systems/ShootingSystem";
 import type { ShotFeedbackEvent, ShotPlan } from "./core/systems/ShootingSystem";
+import { DEFAULT_BALL_PHYSICS_CONFIG, DEFAULT_SHOOTING_CONFIG } from "./core/systems/GameplayConfig";
+import type { ShootingConfig } from "./core/systems/GameplayConfig";
+import { BallActionSystem } from "./core/systems/BallActionSystem";
+import type { BallAction, BallActionEvent, BallActionKind } from "./core/systems/BallActionSystem";
+import { DuelSystem } from "./core/systems/DuelSystem";
 import { GoalkeeperSystem, isBallApproachingGoal } from "./core/systems/GoalkeeperSystem";
 import type { KeeperBrainSnapshot, KeeperDistributionChoice, KeeperReactionAction, KeeperSaveResult } from "./core/systems/GoalkeeperSystem";
 import { KeyboardInput } from "./core/input/KeyboardInput";
 import { TouchInput } from "./core/input/TouchInput";
-import { MatchController } from "./core/input/MatchController";
+import { cameraRelativeDirection, MatchController } from "./core/input/MatchController";
 import { HudController } from "./rendering/HudController";
 import { MinimapController } from "./rendering/MinimapController";
 import { addPitch as addWorldPitch, createBallVisual, createPlayerVisual } from "./rendering/WorldFactory";
@@ -102,7 +107,7 @@ const HALF_W = FIELD_WIDTH / 2;
 const HALF_L = FIELD_LENGTH / 2;
 const PLAYER_RADIUS = 0.75;
 const PLAYER_HEIGHT = 3.4;
-const BALL_RADIUS = 0.55;
+const BALL_RADIUS = DEFAULT_BALL_PHYSICS_CONFIG.radius;
 const GOAL_WIDTH = 13.5;
 const GOAL_DEPTH = 4.5;
 const MATCH_DURATION = 240;
@@ -185,8 +190,8 @@ app.innerHTML = `
         <div class="key-grid">
           <div class="key">WASD Move</div>
           <div class="key">Shift Sprint</div>
-          <div class="key">J Pass</div>
-          <div class="key">K Power • Shift+K Finesse</div>
+          <div class="key">J Pass · U Through · I Lob · O Cross</div>
+          <div class="key">K Power · Shift+K Finesse · P Chip</div>
           <div class="key">L Tackle</div>
           <div class="key">Tab Switch</div>
           <div class="key">C Camera</div>
@@ -198,7 +203,11 @@ app.innerHTML = `
         <div class="stick" data-stick></div>
         <div class="button-cluster" aria-label="Touch actions. Hold sprint while shooting for finesse.">
           <div class="touch-button" data-action="pass">PASS</div>
+          <div class="touch-button" data-action="throughPass">THROUGH</div>
+          <div class="touch-button" data-action="lobPass">LOB</div>
+          <div class="touch-button" data-action="cross">CROSS</div>
           <div class="touch-button" data-action="shoot">SHOOT</div>
+          <div class="touch-button" data-action="chipShot">CHIP</div>
           <div class="touch-button" data-action="sprint">SPRINT</div>
           <div class="touch-button" data-action="tackle">TACKLE</div>
         </div>
@@ -282,8 +291,8 @@ let restartPlacement: ReturnType<typeof positionRestart> | null = null;
 let nextKickoffTeam: TeamId = "home";
 const fixedTimestep = new FixedTimestep({ step: 1 / 60, maxSteps: 8 });
 const movementConfig = DEFAULT_MOVEMENT_CONFIG;
-const dribblingSystem = new DribblingSystem();
-const firstTouchSystem = new FirstTouchSystem();
+const dribblingSystem = new DribblingSystem({ mode: "impulse", attachmentHeight: BALL_RADIUS });
+const firstTouchSystem = new FirstTouchSystem({ ballHeight: BALL_RADIUS });
 let goalkeeperSystem = new GoalkeeperSystem();
 const footballAI = new FootballAISystem();
 let aiDifficulty: AIDifficultyLevel = "normal";
@@ -291,7 +300,26 @@ let spectatorMode = false;
 const keeperBrains = new Map<string, KeeperBrainSnapshot>();
 const keeperDistributions = new Map<string, { choice: KeeperDistributionChoice; remaining: number }>();
 let pendingPass: { passerId: string; team: TeamId; targetId: string } | null = null;
+let pendingPassExpiresAt = 0;
 let releaseLock: { playerId: string; remaining: number } | null = null;
+/** Physics/action time uses the same GAME_SPEED-scaled fixed-step clock. */
+let actionClockSeconds = 0;
+const ballActions = new BallActionSystem();
+const duelSystem = new DuelSystem();
+let actionGeneration = 0;
+const queuedBallActions = new Map<number, {
+  action: BallAction;
+  generation: number;
+  playerId: string;
+  kind: BallActionKind;
+  passPlan?: PassPlan;
+  passStyle?: PassStyle;
+  shotPlan?: ShotPlan;
+  shotConfig?: Partial<ShootingConfig>;
+  restartKind?: string;
+  clearance?: { target: THREE.Vector3; strength: number; lift: number };
+}>();
+const recentBallActionEvents: BallActionEvent[] = [];
 const cameraSystem = new CameraSystem();
 const squadStore = createSquadStore();
 let currentHomeTeam: TeamData = {
@@ -309,6 +337,8 @@ let lastShotPlan: ShotPlan | null = null;
 let lastKeeperResult: KeeperSaveResult | null = null;
 let lastFeedback: PassFeedbackEvent | ShotFeedbackEvent | null = null;
 let pendingShot: { plan: ShotPlan; defendingTeam: TeamId; keeperAttempted?: boolean } | null = null;
+let lastBallPositionBeforePhysics = new THREE.Vector3();
+let goalMouthEntryPosition: THREE.Vector3 | null = null;
 let lastCameraEmphasis = 0;
 let lastRenderDebugAt = 0;
 let lastFrameCaptureAt = 0;
@@ -316,7 +346,11 @@ let keyboardInput = new KeyboardInput();
 let touchInput: TouchInput | undefined;
 const matchController = new MatchController({
   pass: () => passBall(activePlayer),
+  throughPass: () => passBall(activePlayer, undefined, undefined, "through"),
+  lobPass: () => passBall(activePlayer, undefined, undefined, "lob"),
+  cross: () => passBall(activePlayer, undefined, undefined, "cross"),
   shoot: () => shootBall(activePlayer, isFinesseShotRequested() ? "finesse" : "power"),
+  chipShot: () => shootBall(activePlayer, "finesse", { shotLift: DEFAULT_SHOOTING_CONFIG.chipLift }),
   tackle: () => tackle(activePlayer),
   switchPlayer: () => switchToNearestHome(),
   switchCamera: () => {
@@ -338,6 +372,11 @@ const ball = {
 
 function createPlayer(team: TeamData, spec: PlayerData): Player {
   const { group, body, marker, label } = createPlayerVisual(team, spec);
+  // Body variation is presentation-only; gameplay keeps one collision radius
+  // so the shared movement/duel rules remain deterministic across rosters.
+  const heightScale = Number.isFinite(spec.heightScale) ? clamp(spec.heightScale!, 0.94, 1.06) : 1;
+  const weightScale = Number.isFinite(spec.weightScale) ? clamp(spec.weightScale!, 0.94, 1.06) : 1;
+  group.scale.set(weightScale, heightScale, weightScale);
   const position = vectorToField(spec.formation.x, spec.formation.z);
   group.position.copy(position);
   scene.add(group);
@@ -414,6 +453,10 @@ function rebuildHomeSquad() {
 }
 
 function resetMatch() {
+  invalidateBallActions("cancelled");
+  dribblingSystem.reset();
+  duelSystem.reset();
+  actionClockSeconds = 0;
   playerAnimations.reset();
   stadium.reset();
   matchAudio.reset();
@@ -447,6 +490,8 @@ function resetMatch() {
   activePlayer = homePlayers.find((p) => p.short === "Vini Jr.") ?? homePlayers[8];
   setActivePlayer(activePlayer);
   ball.position.set(0, BALL_RADIUS, 0);
+  lastBallPositionBeforePhysics.copy(ball.position);
+  goalMouthEntryPosition = null;
   ball.velocity.set(0, 0, 0);
   ball.spin.set(0, 0, 0);
   ball.mesh.position.copy(ball.position);
@@ -456,6 +501,7 @@ function resetMatch() {
   attackingTeam = "home";
   pendingShot = null;
   pendingPass = null;
+  pendingPassExpiresAt = 0;
   releaseLock = null;
   footballAI.reset();
   keeperBrains.clear();
@@ -493,9 +539,14 @@ function preferredRestartTakerId(plan: RestartPlan): string | undefined {
 }
 
 function prepareRestart(plan: RestartPlan, startCountdown = true) {
+  invalidateBallActions("cancelled");
+  dribblingSystem.reset();
+  duelSystem.reset();
   releaseBall();
   pendingPass = null;
+  pendingPassExpiresAt = 0;
   pendingShot = null;
+  goalMouthEntryPosition = null;
   releaseLock = null;
   referee.clearPending();
   footballAI.reset();
@@ -558,16 +609,18 @@ function addFeed(text: string) {
   }
 }
 
-function attachBallTo(player: Player) {
+function attachBallTo(player: Player, options: { preserveVelocity?: boolean; preserveSpin?: boolean } = {}) {
   if (referee.dismissedIds.has(player.id)) return false;
   const offside = referee.onTouch(player);
   if (offside) { prepareRestart(offside); return false; }
   pendingShot = null;
+  if (ballOwner && ballOwner !== player) cancelBallActionsFor(ballOwner.id, "ownership-lost");
   if (pendingPass) {
     if (player.team === pendingPass.team && player.id !== pendingPass.passerId) {
       matchStats.record(player.team, "completedPasses");
     }
     pendingPass = null;
+    pendingPassExpiresAt = 0;
   }
   releaseLock = null;
   if (ballOwner && ballOwner !== player) {
@@ -578,14 +631,248 @@ function attachBallTo(player: Player) {
   lastTouch = player;
   player.hasBall = true;
   attackingTeam = player.team;
-  ball.velocity.set(0, 0, 0);
-  ball.spin.set(0, 0, 0);
+  if (!options.preserveVelocity) ball.velocity.set(0, 0, 0);
+  if (!options.preserveSpin) ball.spin.set(0, 0, 0);
   addMatchEvent(matchState, "possession", `${player.short} takes possession.`);
   return true;
 }
 
-function releaseBall() {
+type QueueBallActionOptions = {
+  passPlan?: PassPlan;
+  passStyle?: PassStyle;
+  shotPlan?: ShotPlan;
+  shotConfig?: Partial<ShootingConfig>;
+  defendingTeam?: TeamId;
+  restartKind?: string;
+  clearance?: { target: THREE.Vector3; strength: number; lift: number };
+};
+
+function recordBallActionEvent(event: BallActionEvent) {
+  recentBallActionEvents.push(event);
+  while (recentBallActionEvents.length > 24) recentBallActionEvents.shift();
+}
+
+function cancelBallActionsFor(ownerId: string, reason: BallActionEvent["reason"] = "ownership-lost", exceptId?: number) {
+  for (const [id, entry] of queuedBallActions) {
+    if (entry.playerId !== ownerId || id === exceptId) continue;
+    const event = ballActions.cancel(id, reason, actionClockSeconds);
+    if (event) recordBallActionEvent(event);
+    playerAnimations.cancelAction(entry.playerId);
+    queuedBallActions.delete(id);
+  }
+}
+
+function invalidateBallActions(reason: BallActionEvent["reason"] = "cancelled") {
+  actionGeneration += 1;
+  for (const [id, entry] of queuedBallActions) {
+    const event = ballActions.cancel(id, reason, actionClockSeconds);
+    if (event) recordBallActionEvent(event);
+    playerAnimations.cancelAction(entry.playerId);
+  }
+  queuedBallActions.clear();
+  ballActions.reset();
+}
+
+function queueBallAction(player: Player, kind: BallActionKind, options: QueueBallActionOptions = {}) {
+  if (matchState.status !== "playing" || ballOwner !== player || referee.dismissedIds.has(player.id)) return null;
+  // A single player cannot wind up two contacts at once. Explicitly canceling
+  // here also keeps the sidecar map in sync with BallActionSystem's cap.
+  cancelBallActionsFor(player.id, "replaced");
+  const action = ballActions.queue({
+    ownerId: player.id,
+    kind,
+    now: actionClockSeconds,
+    payload: {
+      targetId: options.passPlan?.target.id ?? "",
+      restartKind: options.restartKind ?? ""
+    }
+  });
+  queuedBallActions.set(action.id, {
+    action,
+    generation: actionGeneration,
+    playerId: player.id,
+    kind,
+    passPlan: options.passPlan,
+    passStyle: options.passStyle,
+    shotPlan: options.shotPlan,
+    shotConfig: options.shotConfig,
+    restartKind: options.restartKind,
+    clearance: options.clearance
+  });
+  const presentationAction = kind === "shot" || kind === "volley" || kind === "header" ? "shot"
+    : kind === "clearance" ? "kick" : "pass";
+  const duration = Math.max(action.timing.recovery, 0.08);
+  playerAnimations.startAction(player.id, presentationAction, {
+    clock: "simulation",
+    duration,
+    contactAt: action.timing.contact / duration,
+    preferredFoot: player.preferredFoot === "left" ? "left" : "right",
+    contactTarget: ball.position.clone()
+  });
+  if (options.passPlan) {
+    lastPassPlan = options.passPlan;
+    lastFeedback = options.passPlan.feedback;
+    actionChip.textContent = options.passPlan.interception.interceptable
+      ? `Preparing pass · risk ${Math.round(options.passPlan.feedback.interceptionRisk * 100)}%`
+      : `Preparing pass to ${options.passPlan.target.short}`;
+    addMatchEvent(matchState, "pass", `${player.short} prepares a pass toward ${options.passPlan.target.short}.`);
+    addFeed(`${player.short} shapes to pass toward ${options.passPlan.target.short}.`);
+  }
+  if (options.shotPlan) {
+    lastShotPlan = options.shotPlan;
+    lastFeedback = options.shotPlan.feedback;
+    actionChip.textContent = `Preparing ${options.shotPlan.shotType}`;
+    addMatchEvent(matchState, "shot", `${player.short} prepares a ${options.shotPlan.shotType} shot.`);
+    addFeed(`${player.short} sets up a ${options.shotPlan.shotType} shot.`);
+  }
+  return action;
+}
+
+function triggerContactPresentation(player: Player, kind: BallActionKind) {
+  if (reducedMotion) return;
+  const action = kind === "shot" || kind === "volley" || kind === "header" ? "shot"
+    : kind === "clearance" ? "kick" : kind === "cross" ? "pass" : "pass";
+  playerAnimations.syncActionContact(player.id, { contactTarget: ball.position.clone() });
+  void action;
+}
+
+function syncBallActionPresentation() {
+  for (const queued of queuedBallActions.values()) {
+    const elapsed = actionClockSeconds - queued.action.queuedAt;
+    playerAnimations.syncActionContact(queued.playerId, {
+      elapsed,
+      // Keep the moving ball as the foot target during wind-up. At contact
+      // triggerContactPresentation stores the actual release point; after
+      // that point the follow-through must not chase the kicked ball.
+      ...(elapsed <= queued.action.timing.contact + 0.0001 ? { contactTarget: ball.position.clone() } : {})
+    });
+  }
+}
+
+function processBallActionEvents() {
+  if (matchState.status !== "playing") return;
+  for (const event of ballActions.advance(actionClockSeconds)) {
+    recordBallActionEvent(event);
+    const queued = queuedBallActions.get(event.action.id);
+    if (!queued) continue;
+    if (event.phase === "cancel") {
+      playerAnimations.cancelAction(queued.playerId);
+      queuedBallActions.delete(event.action.id);
+      continue;
+    }
+    if (event.phase === "prepare") {
+      actionChip.textContent = `${queued.kind} wind-up`;
+      continue;
+    }
+    if (event.phase === "recovery") {
+      playerAnimations.syncActionContact(queued.playerId, { elapsed: queued.action.timing.recovery });
+      queuedBallActions.delete(event.action.id);
+      continue;
+    }
+    const player = players.find((candidate) => candidate.id === queued.playerId);
+    const horizontalBallDistance = player
+      ? Math.hypot(player.position.x - ball.position.x, player.position.z - ball.position.z)
+      : Number.POSITIVE_INFINITY;
+    const ballHeightReachable = player
+      ? Math.abs(ball.position.y - BALL_RADIUS) <= 1.65
+      : false;
+    const valid = queued.generation === actionGeneration && player &&
+      ballOwner === player && !referee.dismissedIds.has(player.id);
+    if (!valid || horizontalBallDistance > 1.7 || !ballHeightReachable) {
+      const cancelled = ballActions.cancel(event.action.id, "ownership-lost", actionClockSeconds);
+      if (cancelled) recordBallActionEvent(cancelled);
+      playerAnimations.cancelAction(queued.playerId);
+      queuedBallActions.delete(event.action.id);
+      continue;
+    }
+    if (queued.passPlan) {
+      const receiver = teamPlayers(player.team).find((candidate) => candidate.id === queued.passPlan!.target.id && candidate !== player);
+      if (!receiver) {
+        playerAnimations.cancelAction(player.id);
+        queuedBallActions.delete(event.action.id);
+        continue;
+      }
+      const currentPlan = createPassPlan({
+        passer: player,
+        teammates: teamPlayers(player.team).filter((candidate) => candidate !== player),
+        opponents: teamPlayers(player.team === "home" ? "away" : "home"),
+        ball,
+        intendedTarget: receiver,
+        style: queued.passStyle,
+        desiredDirection: playerForward(player),
+        random: rand
+      });
+      if (!currentPlan) {
+        playerAnimations.cancelAction(player.id);
+        queuedBallActions.delete(event.action.id);
+        continue;
+      }
+      queued.passPlan = currentPlan;
+      lastPassPlan = currentPlan;
+      referee.snapshotPass({ passer: player, players: eligiblePlayers(), ballPosition: currentPlan.origin, restartKind: queued.restartKind });
+      applyPassPlan(ball, currentPlan);
+      pendingPass = { passerId: player.id, team: player.team, targetId: currentPlan.target.id };
+      pendingPassExpiresAt = actionClockSeconds + Math.max(0.8, currentPlan.trajectory.travelTime + 0.55);
+      pendingShot = null;
+      releaseLock = { playerId: player.id, remaining: 0.22 };
+      matchStats.record(player.team, "passes");
+      releaseBall(event.action.id);
+      triggerContactPresentation(player, queued.kind);
+      matchAudio.play("pass");
+      actionChip.textContent = currentPlan.interception.interceptable
+        ? `Pass risk ${Math.round(currentPlan.feedback.interceptionRisk * 100)}%`
+        : `Pass to ${currentPlan.target.short}`;
+      addMatchEvent(matchState, "pass", `${player.short} passes toward ${currentPlan.target.short}.`);
+      addFeed(`${player.short} releases a ${currentPlan.interception.interceptable ? "risky " : "clean "}pass toward ${currentPlan.target.short}.`);
+    } else if (queued.shotPlan) {
+      const defendingTeam = player.team === "home" ? "away" : "home";
+      const currentPlan = createShotPlan({
+        shooter: player,
+        opponents: teamPlayers(defendingTeam),
+        goalkeeper: teamPlayers(defendingTeam).find((candidate) => candidate.role === "GK") ?? null,
+        ball,
+        goal: { center: new THREE.Vector3(0, 2, player.team === "home" ? HALF_L + 1.4 : -HALF_L - 1.4), width: GOAL_WIDTH, height: 4 },
+        shotType: queued.shotPlan.shotType,
+        config: queued.shotConfig,
+        random: rand
+      });
+      if (!currentPlan) {
+        playerAnimations.cancelAction(player.id);
+        queuedBallActions.delete(event.action.id);
+        continue;
+      }
+      queued.shotPlan = currentPlan;
+      lastShotPlan = currentPlan;
+      applyShotPlan(ball, currentPlan);
+      pendingPass = null;
+      pendingPassExpiresAt = 0;
+      releaseLock = { playerId: player.id, remaining: 0.22 };
+      matchStats.record(player.team, "shots");
+      pendingShot = { plan: currentPlan, defendingTeam };
+      releaseBall(event.action.id);
+      triggerContactPresentation(player, queued.kind);
+      stadium.shot(ball.position);
+      matchAudio.play("shot");
+      actionChip.textContent = `${currentPlan.shotType === "power" ? "Power" : "Finesse"} ${Math.round(currentPlan.accuracy * 100)}%`;
+      addMatchEvent(matchState, "shot", `${player.short} takes a ${currentPlan.shotType} shot.`);
+      addFeed(`${player.short} hits a ${currentPlan.shotType} shot toward the ${currentPlan.selectedTarget.side} side.`);
+    } else if (queued.clearance) {
+      releaseLock = { playerId: player.id, remaining: 0.22 };
+      releaseBall(event.action.id);
+      kickBall(ball, queued.clearance.target, queued.clearance.strength, queued.clearance.lift);
+      triggerContactPresentation(player, queued.kind);
+      matchAudio.play("kick");
+      matchStats.record(player.team, "clearances");
+      actionChip.textContent = "Clearance into space";
+      addMatchEvent(matchState, "pass", `${player.short} clears under pressure.`);
+      addFeed(`${player.short} clears into space.`);
+    }
+  }
+}
+
+function releaseBall(exceptActionId?: number) {
   if (ballOwner) {
+    cancelBallActionsFor(ballOwner.id, "ownership-lost", exceptActionId);
     ballOwner.hasBall = false;
   }
   ballOwner = null;
@@ -594,9 +881,13 @@ function releaseBall() {
 
 function playerForward(player: SimPlayer) {
   const forward = new THREE.Vector3(0, 0, player.team === "home" ? 1 : -1);
-  const speed = player.velocity.length();
-  if (speed > 0.15) {
-    forward.copy(player.velocity).normalize();
+  const velocity = new THREE.Vector3(player.velocity.x, 0, player.velocity.z);
+  if (velocity.lengthSq() > 0.0225) {
+    forward.copy(velocity.normalize());
+  } else if (player.mesh && Number.isFinite(player.mesh.rotation.y)) {
+    // Preserve the last root facing when stationary so a sideways stop does
+    // not snap pass/dribble contact back to the team's attack axis.
+    forward.set(Math.sin(player.mesh.rotation.y), 0, Math.cos(player.mesh.rotation.y));
   }
   return forward;
 }
@@ -616,39 +907,26 @@ function switchToNearestHome() {
   if (best) setActivePlayer(best);
 }
 
-function passBall(player: Player, intendedTarget?: Player, restartKind?: string) {
+function passBall(player: Player, intendedTarget?: Player, restartKind?: string, style: PassStyle = "ground") {
   if (matchState.status !== "playing" || ballOwner !== player) {
     return;
   }
   const teammates = teamPlayers(player.team).filter((p) => p !== player);
   const opponents = teamPlayers(player.team === "home" ? "away" : "home");
-  const plan = executePass({
+  const plan = createPassPlan({
     passer: player,
     teammates,
     opponents,
     ball,
     intendedTarget,
+    style,
     desiredDirection: playerForward(player),
     random: rand
   });
   if (!plan) {
     return;
   }
-  referee.snapshotPass({ passer: player, players: eligiblePlayers(), ballPosition: plan.origin, restartKind });
-  releaseBall();
-  releaseLock = { playerId: player.id, remaining: 0.22 };
-  pendingPass = { passerId: player.id, team: player.team, targetId: plan.target.id };
-  matchStats.record(player.team, "passes");
-  pendingShot = null;
-  lastPassPlan = plan;
-  if (!reducedMotion) playerAnimations.trigger(player.id, "pass");
-  matchAudio.play("pass");
-  lastFeedback = plan.feedback;
-  actionChip.textContent = plan.interception.interceptable
-    ? `Pass risk ${Math.round(plan.feedback.interceptionRisk * 100)}%`
-    : `Pass to ${plan.target.short}`;
-  addMatchEvent(matchState, "pass", `${player.short} passes toward ${plan.target.short}.`);
-  addFeed(`${player.short} threads a ${plan.interception.interceptable ? "risky " : "clean "}pass toward ${plan.target.short}.`);
+  queueBallAction(player, style === "cross" ? "cross" : "pass", { passPlan: plan, passStyle: style, restartKind });
 }
 
 function togglePause() {
@@ -657,7 +935,7 @@ function togglePause() {
   audioStatusEl.textContent = soundEnabled ? (matchState.status === "paused" ? "Paused · sound is silent." : "Sound on · pauses with the match.") : "Sound off · enable when ready.";
 }
 
-function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
+function shootBall(player: Player, shotType: "power" | "finesse" = "power", shotConfig: Partial<ShootingConfig> = {}) {
   if (matchState.status !== "playing" || ballOwner !== player) {
     return;
   }
@@ -665,7 +943,7 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
   const opponents = teamPlayers(defendingTeam);
   const goalkeeper = opponents.find((candidate) => candidate.role === "GK") ?? null;
   const targetZ = player.team === "home" ? HALF_L + 1.4 : -HALF_L - 1.4;
-  const plan = executeShot({
+  const plan = createShotPlan({
     shooter: player,
     opponents,
     goalkeeper,
@@ -676,69 +954,72 @@ function shootBall(player: Player, shotType: "power" | "finesse" = "power") {
       height: 4
     },
     shotType,
+    config: shotConfig,
     random: rand
   });
   if (!plan) {
     return;
   }
-  releaseBall();
-  releaseLock = { playerId: player.id, remaining: 0.22 };
-  pendingPass = null;
-  matchStats.record(player.team, "shots");
-  lastShotPlan = plan;
-  if (!reducedMotion) playerAnimations.trigger(player.id, "shot");
-  stadium.shot(ball.position);
-  matchAudio.play("shot");
-  pendingShot = { plan, defendingTeam };
-  lastFeedback = plan.feedback;
-  actionChip.textContent = `${shotType === "power" ? "Power" : "Finesse"} ${Math.round(plan.accuracy * 100)}%`;
-  addMatchEvent(matchState, "shot", `${player.short} takes a ${shotType} shot.`);
-  addFeed(`${player.short} hits a ${shotType} shot toward the ${plan.selectedTarget.side} side.`);
+  queueBallAction(player, "shot", { shotPlan: plan, shotConfig, defendingTeam });
 }
 
 function tackle(player: Player) {
   if (matchState.status !== "playing" || referee.dismissedIds.has(player.id)) return;
   const target = ballOwner;
   if (!target || target.team === player.team || player.cooldown > 0) return;
-  const dist = target.position.distanceTo(player.position);
-  if (dist < 3.2) {
-    if (!reducedMotion) playerAnimations.trigger(player.id, "tackle");
-    matchAudio.play("tackle");
-    const success = player.stats.defending + player.stats.physical * 0.4 + rand(0, 35);
-    const resistance = target.stats.dribbling + target.stats.physical * 0.28 + rand(0, 35);
-    player.cooldown = 0.65;
-    const assessment = referee.assessTackle({ offender: player, victim: target, wonBall: success > resistance,
-      fromBehind: player.position.clone().sub(target.position).dot(playerForward(target)) < -0.5,
-      relativeSpeed: player.velocity.clone().sub(target.velocity).length(), possessionTeam: target.team });
-    if (assessment.foul) {
-      matchStats.record(player.team, "fouls");
-      if (assessment.card === "yellow" || assessment.card === "secondYellow") matchStats.record(player.team, "yellowCards");
-      if (assessment.card === "red" || assessment.card === "secondYellow") matchStats.record(player.team, "redCards");
-      if (referee.dismissedIds.has(player.id)) {
-        player.mesh.visible = false;
-        player.velocity.set(0, 0, 0);
-        if (player === activePlayer) switchToNearestHome();
-      }
-      addFeed(`${player.short}: ${assessment.reason}${assessment.card ? ` (${assessment.card})` : ""}`);
-      if (assessment.restart) prepareRestart(assessment.restart);
-      else if (assessment.advantage) actionChip.textContent = "Advantage — play on";
-      return;
+  const now = actionClockSeconds;
+  const input = {
+    challenger: player,
+    owner: target,
+    ballPosition: ball.position,
+    now,
+    action: "poke" as const
+  };
+  const eligibility = duelSystem.eligibility(input);
+  if (!eligibility.eligible) {
+    if (eligibility.reason === "ball-protected") {
+      actionChip.textContent = "Shielded";
+      addFeed(`${target.short} shields the ball.`);
     }
-    if (success > resistance) {
-      if (!attachBallTo(player)) return;
-      matchStats.record(player.team, "tackles");
-      addMatchEvent(matchState, "tackle", `${player.short} wins the tackle.`);
-      addFeed(`${player.short} wins the tackle.`);
-    } else if (ballOwner === target) {
-      const knock = target.position.clone().sub(player.position).normalize().multiplyScalar(9);
-      releaseBall();
-      pendingShot = null;
-      lastTouch = player;
-      ball.velocity.copy(knock);
-      ball.spin.set(0, 0, 0);
-      addMatchEvent(matchState, "tackle", `${player.short} pokes it loose.`);
-      addFeed(`${player.short} pokes it loose.`);
+    return;
+  }
+  const result = duelSystem.resolve({ ...input, random: rand(0, 1) });
+  if (!reducedMotion) playerAnimations.trigger(player.id, "tackle");
+  matchAudio.play("tackle");
+  player.cooldown = Math.max(player.cooldown, result.cooldownUntil - now);
+  const assessment = referee.assessTackle({ offender: player, victim: target, wonBall: result.status === "won",
+    fromBehind: result.eligibility.shielding.approachDot < -0.3,
+    relativeSpeed: player.velocity.clone().sub(target.velocity).length(), possessionTeam: target.team });
+  if (assessment.foul) {
+    matchStats.record(player.team, "fouls");
+    if (assessment.card === "yellow" || assessment.card === "secondYellow") matchStats.record(player.team, "yellowCards");
+    if (assessment.card === "red" || assessment.card === "secondYellow") matchStats.record(player.team, "redCards");
+    if (referee.dismissedIds.has(player.id)) {
+      player.mesh.visible = false;
+      player.velocity.set(0, 0, 0);
+      invalidateBallActions("cancelled");
+      if (player === activePlayer) switchToNearestHome();
     }
+    addFeed(`${player.short}: ${assessment.reason}${assessment.card ? ` (${assessment.card})` : ""}`);
+    if (assessment.restart) prepareRestart(assessment.restart);
+    else if (assessment.advantage) actionChip.textContent = "Advantage — play on";
+    return;
+  }
+  if (result.status === "won") {
+    if (!attachBallTo(player)) return;
+    matchStats.record(player.team, "tackles");
+    addMatchEvent(matchState, "tackle", `${player.short} wins the tackle.`);
+    addFeed(`${player.short} wins the tackle.`);
+  } else if (result.status === "lost" && ballOwner === target) {
+    // A failed challenge is a recovery beat for the challenger. It does not
+    // magically detach the ball from the owner; only a won duel or an
+    // explicit deflection can change possession.
+    player.velocity.multiplyScalar(0.62);
+    addMatchEvent(matchState, "tackle", `${player.short} misses the poke.`);
+    addFeed(`${player.short} cannot get around ${target.short}.`);
+  } else if (result.status === "protected") {
+    actionChip.textContent = "Shielded";
+    addFeed(`${target.short} shields the ball.`);
   }
 }
 
@@ -805,6 +1086,12 @@ function updateAI(dt: number) {
     playerRadius: PLAYER_RADIUS,
     dt,
     random: rand,
+    passIntent: pendingPass && actionClockSeconds <= pendingPassExpiresAt ? {
+      passerId: pendingPass.passerId,
+      receiverId: pendingPass.targetId,
+      team: pendingPass.team,
+      expiresAtMs: pendingPassExpiresAt * 1000
+    } : null,
     onPass: (player, target) => passBall(player as Player, target as Player | undefined),
     onShoot: (player) => shootBall(player as Player),
     onClear: (player) => clearBall(player as Player),
@@ -817,18 +1104,11 @@ function clearBall(player: Player) {
   if (matchState.status !== "playing" || ballOwner !== player) return;
   const direction = player.team === "home" ? 1 : -1;
   const target = player.position.clone().add(new THREE.Vector3(rand(-14, 14), 2.5, direction * 34));
-  releaseBall();
-  releaseLock = { playerId: player.id, remaining: 0.22 };
   pendingPass = null;
+  pendingPassExpiresAt = 0;
   pendingShot = null;
-  kickBall(ball, target, 30, 2.8);
-  if (!reducedMotion) playerAnimations.trigger(player.id, "kick");
-  matchAudio.play("kick");
   lastFeedback = null;
-  matchStats.record(player.team, "clearances");
-  actionChip.textContent = "Clearance into space";
-  addMatchEvent(matchState, "pass", `${player.short} clears under pressure.`);
-  addFeed(`${player.short} clears into space.`);
+  queueBallAction(player, "clearance", { clearance: { target, strength: 30, lift: 2.8 } });
 }
 
 function updateGoalkeepers(dt: number) {
@@ -875,12 +1155,26 @@ function updateGoalkeepers(dt: number) {
 
 function updateBall(dt: number) {
   const previousPosition = ball.position.clone();
+  lastBallPositionBeforePhysics.copy(previousPosition);
   const owner = ballOwner;
+  const recordGoalMouthEntry = () => {
+    const direction = ball.velocity.z >= 0 ? 1 : -1;
+    const edge = HALF_L + BALL_RADIUS;
+    const before = previousPosition.z * direction;
+    const after = ball.position.z * direction;
+    if (before >= edge || after < edge || Math.abs(ball.velocity.z) < 0.0001) return;
+    const t = (direction * edge - previousPosition.z) / (ball.position.z - previousPosition.z);
+    const entry = previousPosition.clone().lerp(ball.position, clamp(t, 0, 1));
+    if (Math.abs(entry.x) + BALL_RADIUS < GOAL_WIDTH / 2 && entry.y + BALL_RADIUS < 4.8) {
+      goalMouthEntryPosition = entry;
+    }
+  };
   if (owner) {
     lastDribblingResult = dribblingSystem.update({
       player: owner,
       ball,
       dt,
+      now: actionClockSeconds,
       sprint: owner === activePlayer && !spectatorMode
         ? keyboardInput.getState().sprint || Boolean(touchInput?.getState().sprint)
         : owner.velocity.length() > 8.8,
@@ -897,6 +1191,7 @@ function updateBall(dt: number) {
   }
 
   if (owner) {
+    recordGoalMouthEntry();
     const crossing = resolveOutOfPlay({ previousPosition, position: ball.position, bounds: { halfWidth: HALF_W, halfLength: HALF_L }, ballRadius: BALL_RADIUS, goalWidth: GOAL_WIDTH, lastTouchTeam: owner.team });
     if (crossing) {
       if (crossing.kind === "goal") scoreGoal(crossing.team);
@@ -907,7 +1202,7 @@ function updateBall(dt: number) {
   // Dribbling owns the attached-ball position. Running BallSystem's owner
   // branch afterwards would overwrite its stat-scaled touch point, so physics
   // is only advanced once the ball is loose.
-  if (!ballOwner) {
+  if (!ballOwner || lastDribblingResult?.mode === "impulse") {
     updateBallPhysics({
       ball,
       ballOwner: null,
@@ -923,7 +1218,45 @@ function updateBall(dt: number) {
       onOutOfPlay: prepareRestart,
       lastTouchTeam: lastTouch?.team
     });
+    recordGoalMouthEntry();
   }
+}
+
+function firstSegmentSphereContact(start: THREE.Vector3, end: THREE.Vector3, center: THREE.Vector3, radius: number) {
+  const segment = end.clone().sub(start);
+  const offset = start.clone().sub(center);
+  const a = segment.lengthSq();
+  const radiusSq = radius * radius;
+  if (offset.lengthSq() <= radiusSq) return { t: 0, point: start.clone() };
+  if (a <= 0.000001) return null;
+  const b = 2 * offset.dot(segment);
+  const c = offset.lengthSq() - radiusSq;
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) return null;
+  const root = Math.sqrt(Math.max(0, discriminant));
+  const t = (-b - root) / (2 * a);
+  if (t < 0 || t > 1) return null;
+  return { t, point: start.clone().lerp(end, t) };
+}
+
+function keeperContactBeforeGoalPlane(team: TeamId) {
+  const pending = pendingShot;
+  if (!pending || pending.plan.shooter.team !== team) return null;
+  const direction = team === "home" ? 1 : -1;
+  const plane = HALF_L + 0.8;
+  const start = goalMouthEntryPosition?.clone() ?? lastBallPositionBeforePhysics.clone();
+  const end = ball.position.clone();
+  const startAlong = start.z * direction;
+  const endAlong = end.z * direction;
+  if (startAlong >= plane || endAlong < plane) return null;
+  const planeDelta = end.z - start.z;
+  const planeT = planeDelta === 0 ? 1 : clamp((direction * plane - start.z) / planeDelta, 0, 1);
+  const keeper = teamPlayers(pending.defendingTeam).find((player) => player.role === "GK");
+  if (!keeper) return null;
+  const reach = goalkeeperSystem.config.baseReach + clamp(keeper.stats.physical / 100, 0, 1) * goalkeeperSystem.config.reachStatScale + BALL_RADIUS;
+  const contact = firstSegmentSphereContact(start, end, keeper.position.clone().setY(1.25), reach);
+  if (!contact || contact.t > planeT + 0.0001 || contact.point.y > 4.8) return null;
+  return { keeper, point: contact.point, t: contact.t };
 }
 
 function scoreGoal(team: TeamId) {
@@ -931,9 +1264,17 @@ function scoreGoal(team: TeamId) {
   if (pendingShot && pendingShot.plan.shooter.team !== team) {
     pendingShot = null;
   }
-  if (pendingShot && resolveGoalkeeperSave(team)) {
+  const keeperContact = keeperContactBeforeGoalPlane(team);
+  const goalPlanePosition = ball.position.clone();
+  if (keeperContact) ball.position.copy(keeperContact.point);
+  if (keeperContact && resolveGoalkeeperSave(team)) {
+    // The save is adjudicated at the first swept contact, before the goal
+    // plane. This prevents a late callback from rescuing a ball already over
+    // the line while keeping the physical contact point inspectable.
     return;
   }
+  ball.position.copy(goalPlanePosition);
+  ball.mesh.position.copy(ball.position);
   const scorer = lastTouch?.team === team ? lastTouch.short : team === "home" ? "Real Madrid" : "Manchester City";
   if (!matchRules.scoreGoal(team, () => `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`)) return;
   matchStats.record(team, "goals");
@@ -948,8 +1289,10 @@ function scoreGoal(team: TeamId) {
   goalMomentEl.querySelector<HTMLElement>("[data-goal-score]")!.textContent = scoreText(matchState);
   goalMomentEl.hidden = false;
   pendingPass = null;
+  pendingPassExpiresAt = 0;
   const goalText = matchState.events[0]?.description ?? `GOAL! ${scorer} makes it ${compactScoreText(matchState)}.`;
   pendingShot = null;
+  goalMouthEntryPosition = null;
   if (!reducedMotion) cameraSystem.goalEmphasis(ball.position.clone(), { duration: 2.3, strength: 0.9 });
   addFeed(goalText);
   updateHud();
@@ -1015,6 +1358,39 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   return true;
 }
 
+function resolvePassiveDuel() {
+  if (!ballOwner) return false;
+  const opponents = teamPlayers(ballOwner.team === "home" ? "away" : "home");
+  const challenger = opponents
+    .filter((candidate) => candidate.role !== "GK")
+    .sort((a, b) => a.position.distanceToSquared(ball.position) - b.position.distanceToSquared(ball.position) || a.id.localeCompare(b.id))[0];
+  if (!challenger) return false;
+  const input = {
+    challenger,
+    owner: ballOwner,
+    ballPosition: ball.position,
+    now: actionClockSeconds,
+    action: "poke" as const
+  };
+  const eligibility = duelSystem.eligibility(input);
+  if (!eligibility.eligible) return false;
+  const result = duelSystem.resolve({ ...input, random: rand(0, 1) });
+  if (result.status === "won") {
+    if (!attachBallTo(challenger as Player)) return true;
+    matchStats.record(challenger.team, "tackles");
+    addMatchEvent(matchState, "tackle", `${challenger.short} wins a shoulder-to-shoulder duel.`);
+    addFeed(`${challenger.short} wins the duel.`);
+    return true;
+  }
+  if (result.status === "lost") {
+    challenger.velocity.multiplyScalar(0.62);
+    addMatchEvent(matchState, "tackle", `${challenger.short} fails to dislodge the ball.`);
+    addFeed(`${ballOwner.short} keeps the ball under pressure.`);
+    return true;
+  }
+  return false;
+}
+
 function resolvePossession() {
   if (pendingShot && !isBallApproachingGoal(ball, pendingShot.defendingTeam)) pendingShot = null;
   // Incoming shots use the keeper's reaction/save model once, never the
@@ -1025,12 +1401,16 @@ function resolvePossession() {
       if (resolveGoalkeeperSave(pendingShot.plan.shooter.team)) return;
     }
   }
+  if (ballOwner) {
+    resolvePassiveDuel();
+    return;
+  }
   const resolution = resolvePossessionSystem({
     players: eligiblePlayers(),
     homePlayers: teamPlayers("home"),
     awayPlayers: teamPlayers("away"),
     activePlayer,
-    ballOwner,
+    ballOwner: null,
     ballPosition: ball.position,
     random: rand,
     excludedPlayerIds: [
@@ -1048,6 +1428,7 @@ function resolvePossession() {
   if (offside) { prepareRestart(offside); return; }
   lastTouch = owner;
   if (pendingPass && owner.team !== pendingPass.team) pendingPass = null;
+  if (pendingPass === null) pendingPassExpiresAt = 0;
   if (!ballOwner) {
     lastFirstTouchResult = firstTouchSystem.update({
       player: owner,
@@ -1066,7 +1447,7 @@ function resolvePossession() {
   }
 
   pendingShot = null;
-  if (!attachBallTo(owner)) return;
+  if (!attachBallTo(owner, { preserveVelocity: lastFirstTouchResult?.retained === true, preserveSpin: lastFirstTouchResult?.retained === true })) return;
   if (resolution.feedText) {
     addFeed(resolution.feedText);
   }
@@ -1079,18 +1460,9 @@ function getInputDirection() {
   const dir = keyboardInput.getState().direction;
   const touchDirection = touchInput?.getState().direction;
   if (touchDirection) dir.add(touchDirection);
-
-  if (matchState.cameraMode === "broadcast") {
-    return dir;
-  }
-
   const cameraForward = new THREE.Vector3();
   camera.getWorldDirection(cameraForward);
-  cameraForward.y = 0;
-  cameraForward.normalize();
-  const cameraRight = new THREE.Vector3().crossVectors(cameraForward, new THREE.Vector3(0, 1, 0)).normalize();
-  const transformed = cameraForward.multiplyScalar(dir.z).add(cameraRight.multiplyScalar(dir.x));
-  return transformed;
+  return cameraRelativeDirection(dir, cameraForward);
 }
 
 function handleActions() {
@@ -1293,6 +1665,7 @@ function step() {
       if (event.type === "fullTime") endMatch();
     }
     if (matchState.status !== "playing") return;
+    actionClockSeconds += dt;
     const recalled = referee.update(fixedDt, ballOwner?.team ?? null);
     if (recalled) { prepareRestart(recalled); return; }
     if (releaseLock) {
@@ -1306,6 +1679,8 @@ function step() {
       updatePlayerMovement(activePlayer, input, sprint, dt);
     }
     updateAI(dt);
+    processBallActionEvents();
+    syncBallActionPresentation();
     if (matchState.status !== "playing") return;
     updateBall(dt);
     if (matchState.status !== "playing") return;

@@ -23,6 +23,9 @@ export const realMadrid: TeamData = {
       number: 2,
       role: "DEF",
       formation: { x: 27, z: -34 },
+      preferredFoot: "right",
+      heightScale: 1.02,
+      weightScale: 1.01,
       stats: { pace: 77, shooting: 58, passing: 78, dribbling: 76, defending: 84, physical: 78 }
     },
     {
@@ -31,6 +34,9 @@ export const realMadrid: TeamData = {
       number: 22,
       role: "DEF",
       formation: { x: 9, z: -37 },
+      preferredFoot: "right",
+      heightScale: 1.05,
+      weightScale: 1.04,
       stats: { pace: 82, shooting: 49, passing: 69, dribbling: 66, defending: 88, physical: 88 }
     },
     {
@@ -39,6 +45,9 @@ export const realMadrid: TeamData = {
       number: 3,
       role: "DEF",
       formation: { x: -9, z: -37 },
+      preferredFoot: "right",
+      heightScale: 1.04,
+      weightScale: 1.02,
       stats: { pace: 84, shooting: 50, passing: 70, dribbling: 69, defending: 86, physical: 84 }
     },
     {
@@ -47,6 +56,9 @@ export const realMadrid: TeamData = {
       number: 23,
       role: "DEF",
       formation: { x: -27, z: -34 },
+      preferredFoot: "left",
+      heightScale: 1.01,
+      weightScale: 0.99,
       stats: { pace: 86, shooting: 47, passing: 72, dribbling: 78, defending: 82, physical: 80 }
     },
     {
@@ -55,6 +67,9 @@ export const realMadrid: TeamData = {
       number: 18,
       role: "MID",
       formation: { x: 0, z: -18 },
+      preferredFoot: "right",
+      heightScale: 1.04,
+      weightScale: 1.03,
       stats: { pace: 74, shooting: 70, passing: 82, dribbling: 79, defending: 84, physical: 86 }
     },
     {
@@ -63,6 +78,9 @@ export const realMadrid: TeamData = {
       number: 15,
       role: "MID",
       formation: { x: 17, z: -7 },
+      preferredFoot: "right",
+      heightScale: 1.05,
+      weightScale: 1.01,
       stats: { pace: 89, shooting: 83, passing: 84, dribbling: 83, defending: 80, physical: 86 }
     },
     {
@@ -71,6 +89,9 @@ export const realMadrid: TeamData = {
       number: 5,
       role: "MID",
       formation: { x: -14, z: -5 },
+      preferredFoot: "right",
+      heightScale: 1.06,
+      weightScale: 1.02,
       stats: { pace: 82, shooting: 85, passing: 86, dribbling: 88, defending: 79, physical: 84 }
     },
     {
@@ -79,6 +100,9 @@ export const realMadrid: TeamData = {
       number: 11,
       role: "FWD",
       formation: { x: 23, z: 18 },
+      preferredFoot: "right",
+      heightScale: 0.99,
+      weightScale: 0.97,
       stats: { pace: 88, shooting: 84, passing: 80, dribbling: 89, defending: 42, physical: 68 }
     },
     {
@@ -87,6 +111,9 @@ export const realMadrid: TeamData = {
       number: 7,
       role: "FWD",
       formation: { x: -22, z: 20 },
+      preferredFoot: "left",
+      heightScale: 1.00,
+      weightScale: 0.98,
       stats: { pace: 96, shooting: 86, passing: 80, dribbling: 93, defending: 36, physical: 73 }
     },
     {
@@ -95,6 +122,9 @@ export const realMadrid: TeamData = {
       number: 9,
       role: "FWD",
       formation: { x: 0, z: 27 },
+      preferredFoot: "right",
+      heightScale: 1.02,
+      weightScale: 1.00,
       stats: { pace: 97, shooting: 92, passing: 83, dribbling: 93, defending: 39, physical: 80 }
     }
   ]
@@ -123,6 +153,9 @@ export const manCity: TeamData = {
       number: 2,
       role: "DEF",
       formation: { x: -27, z: 34 },
+      preferredFoot: "right",
+      heightScale: 1.03,
+      weightScale: 1.02,
       stats: { pace: 91, shooting: 63, passing: 77, dribbling: 76, defending: 85, physical: 83 }
     },
     {
@@ -131,6 +164,9 @@ export const manCity: TeamData = {
       number: 3,
       role: "DEF",
       formation: { x: -9, z: 37 },
+      preferredFoot: "right",
+      heightScale: 1.04,
+      weightScale: 1.04,
       stats: { pace: 69, shooting: 45, passing: 73, dribbling: 66, defending: 89, physical: 88 }
     },
     {
@@ -139,6 +175,9 @@ export const manCity: TeamData = {
       number: 5,
       role: "DEF",
       formation: { x: 9, z: 37 },
+      preferredFoot: "right",
+      heightScale: 1.03,
+      weightScale: 1.01,
       stats: { pace: 72, shooting: 55, passing: 80, dribbling: 75, defending: 86, physical: 80 }
     },
     {
@@ -147,6 +186,9 @@ export const manCity: TeamData = {
       number: 24,
       role: "DEF",
       formation: { x: 27, z: 34 },
+      preferredFoot: "left",
+      heightScale: 1.01,
+      weightScale: 1.00,
       stats: { pace: 82, shooting: 63, passing: 78, dribbling: 78, defending: 84, physical: 82 }
     },
     {
@@ -155,6 +197,9 @@ export const manCity: TeamData = {
       number: 16,
       role: "MID",
       formation: { x: 0, z: 18 },
+      preferredFoot: "right",
+      heightScale: 1.06,
+      weightScale: 1.05,
       stats: { pace: 66, shooting: 80, passing: 90, dribbling: 84, defending: 88, physical: 85 }
     },
     {
@@ -163,6 +208,9 @@ export const manCity: TeamData = {
       number: 17,
       role: "MID",
       formation: { x: -17, z: 7 },
+      preferredFoot: "right",
+      heightScale: 1.03,
+      weightScale: 1.00,
       stats: { pace: 75, shooting: 88, passing: 94, dribbling: 87, defending: 64, physical: 78 }
     },
     {
@@ -171,6 +219,9 @@ export const manCity: TeamData = {
       number: 20,
       role: "MID",
       formation: { x: 14, z: 5 },
+      preferredFoot: "left",
+      heightScale: 0.98,
+      weightScale: 0.96,
       stats: { pace: 82, shooting: 79, passing: 86, dribbling: 92, defending: 72, physical: 68 }
     },
     {
@@ -179,6 +230,9 @@ export const manCity: TeamData = {
       number: 47,
       role: "FWD",
       formation: { x: -23, z: -18 },
+      preferredFoot: "left",
+      heightScale: 0.99,
+      weightScale: 0.96,
       stats: { pace: 86, shooting: 86, passing: 84, dribbling: 91, defending: 57, physical: 65 }
     },
     {
@@ -187,6 +241,9 @@ export const manCity: TeamData = {
       number: 11,
       role: "FWD",
       formation: { x: 22, z: -20 },
+      preferredFoot: "right",
+      heightScale: 0.98,
+      weightScale: 0.97,
       stats: { pace: 94, shooting: 78, passing: 76, dribbling: 91, defending: 42, physical: 72 }
     },
     {
@@ -195,6 +252,9 @@ export const manCity: TeamData = {
       number: 9,
       role: "FWD",
       formation: { x: 0, z: -27 },
+      preferredFoot: "right",
+      heightScale: 1.06,
+      weightScale: 1.07,
       stats: { pace: 88, shooting: 94, passing: 72, dribbling: 82, defending: 49, physical: 92 }
     }
   ]
