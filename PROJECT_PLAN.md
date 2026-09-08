@@ -1835,27 +1835,26 @@ Out of Scope:
 - Full transfer market.
 - Licensed card art.
 
-### Phase 6.5 - Football Realism (WIP checkpoint; not accepted)
+### Phase 6.5 - Football Realism (Accepted)
 
-Implementation status (2026-09-08): The realism recommendations in [`artifacts/realism/REVIEW.md`](./artifacts/realism/REVIEW.md) are captured in the current Phase 6.5 integration checkpoint under the owner-requested development freeze and checkpoint delivery. The pre-checkpoint baseline was `7814941 Add durable Codex project handoff`; this checkpoint is deliberately narrower than the full recommendation list and is documented with current evidence and limits in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md). Root owns review and final Git delivery. It must pass root review before Phase 7 work resumes.
+Implementation status (2026-09-08): The realism recommendations in [`artifacts/realism/REVIEW.md`](./artifacts/realism/REVIEW.md) were implemented and accepted as the Phase 6.5 integration checkpoint. The delivered scope and evidence are recorded in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md) and are included in the delivery commit containing this status.
 
 Current checkpoint scope:
 
 - Shared football scale tuning, including ball radius, restart placement, first-touch and dribble configuration alignment.
-- Simulation-owned timed ball actions with preparation, contact and recovery phases, action cancellation and simulation-clock presentation synchronization.
-- Physical impulse dribbling/first-touch continuity, possession turnover invalidation, event-based duel/shielding integration and a two-presser ceiling preserved in AI.
-- Live receiver pass intent and trajectory/reachability prediction, stationary facing preservation, camera-relative controls for the sideline view and a sideline broadcast camera.
+- Simulation-owned timed ball actions with preparation, contact and recovery phases, pause-safe progression, reset/generation invalidation, single physical release and contact reach/height acceptance, with simulation-clock presentation synchronization.
+- Directional physical dribbling, retained first-touch velocity, possession turnover invalidation, event-based duel/shielding integration and a two-presser ceiling preserved in AI.
+- Live receiver pass intent and trajectory/reachability prediction, stationary facing preservation, corrected camera-relative controls for the sideline view and a sideline broadcast camera.
 - Preferred-foot/body metadata through the existing fictional data and management conversion path.
-- Through, lob, cross and chip controls are partially wired in the current checkpoint; the complete aerial loop is not part of this acceptance claim.
+- Through, lob, cross and chip controls plus integrated aerial header, volley, defensive clearance, contest and goalkeeper claim paths; keeper adjudication rejects teleporting a ball already beyond the whole-ball goal plane.
 
-Frozen verification and review gate:
+Acceptance verification:
 
-- `npm.cmd test`: **261 passed / 262 total across 43 files, with one failure** in `DribblingSystem.test.ts` for the distant/sharp-turn ownership-release expectation. This failure remains future work.
-- `npm.cmd run build`: passes TypeScript and Vite; the main chunk is about 721.69 kB minified / 198.46 kB gzip and still exceeds Vite's advisory threshold.
-- Integrated runtime evidence is still required for pause mid-windup, ownership turnover, restart/squad Play reset, one physical release, contact reach/height and contact-to-pose/audio alignment.
-- Keeper swept contact before the goal plane, moving receiver behavior, failed versus successful duels, first-touch retained velocity and physical dribble continuity need focused cross-system evidence.
-- The frozen review also found the camera-relative screen-right basis reversed for the sideline view, and the current goal-mouth/keeper path changes goal adjudication from the whole-ball line to goal depth; both require geometry review before acceptance.
-- Root must complete final browser checks on desktop and 390×844, including manual/touch flows and console output. Phase 6.5 is not accepted and Phase 7 remains unstarted.
+- `npm.cmd test`: **294 passed / 294 total across 48 files**.
+- `npm.cmd run build`: passes TypeScript and Vite; the main chunk is **728.77 kB minified / 200.39 kB gzip** and still exceeds Vite's advisory threshold.
+- Cross-system acceptance covers pause mid-windup, ownership turnover, restart/squad clearing, single physical release, contact reach/height, reset semantics, physical dribble/first touch, moving receiver behavior, successful/failed duels, aerial actions and swept keeper contact.
+- Browser QA covered desktop rendering; pause clock hold; Squad Hub Play reset of score/time and kickoff; Broadcast/Follow camera switching; 390×844 touch controls (all eight buttons and joystick within the viewport, Lob triggering pass wind-up); reduced-motion toggle/class behavior; and approximately two minutes of sustained smoke. No console warnings or errors were observed. No screenshots or clips were saved.
+- Independent re-review found no acceptance blocker. Phase 6.5 is accepted; Phase 7 may now start but remains unstarted.
 
 ### Phase 7 - Progression And Modes
 

@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";
-import { createRestartPlan, positionRestart, resolveOutOfPlay } from "./RestartSystem";
+import { createRestartPlan, positionRestart, resolveOutOfPlay, sweepGoalLineCrossing } from "./RestartSystem";
 import type { SimPlayer } from "./types";
 
 const bounds = { halfWidth: 36, halfLength: 56 };
@@ -19,6 +19,26 @@ describe("Phase 4 out of play", () => {
   });
   it.each([1, -1])("awards goals before endline restarts in direction %s", (direction) => {
     expect(resolve(vec(0, 0.55, direction * 55), vec(0, 0.55, direction * 57), "away")).toMatchObject({ kind: "goal", team: direction === 1 ? "home" : "away" });
+  });
+  it("adjudicates at the whole-ball line instead of goal depth", () => {
+    const beforeLine = resolve(vec(0, 0.55, 56.5), vec(0, 0.55, 56.54), "home");
+    expect(beforeLine).toBeNull();
+
+    const result = resolve(vec(0, 0.55, 56.54), vec(0, 0.55, 56.6), "home");
+    expect(result?.kind).toBe("goal");
+    if (result?.kind === "goal") expect(result.position.z).toBeCloseTo(bounds.halfLength + 0.55);
+  });
+  it("exposes the swept goal-plane point for keeper adjudication", () => {
+    const crossing = sweepGoalLineCrossing({
+      previousPosition: vec(0, 0.55, 55),
+      position: vec(0, 0.55, 57),
+      bounds,
+      ballRadius: 0.55,
+      goalWidth: 13.5
+    });
+    expect(crossing).toMatchObject({ direction: 1, plane: bounds.halfLength + 0.55 });
+    expect(crossing?.position.z).toBeCloseTo(bounds.halfLength + 0.55);
+    expect(crossing?.t).toBeCloseTo((bounds.halfLength + 0.55 - 55) / 2);
   });
   it.each([1, -1])("uses last touch for wide shots and high misses %s", (direction) => {
     const attacker = direction === 1 ? "home" : "away";

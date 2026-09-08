@@ -153,6 +153,21 @@ describe("PlayerPresentation", () => {
     },
   );
 
+  it.each<PlayerAction>(["header", "volley", "clearance"])(
+    "renders the aerial %s pose without moving the gameplay root",
+    (action) => {
+      const { player, system } = fixture();
+      const root = player.mesh.position.clone();
+      system.startAction(player.id, action, { clock: "renderer", contactAt: 0.2 });
+      system.update([player], 0.12);
+      expect(system.debugSnapshot().actions[0].action).toBe(action);
+      expect(player.mesh.position.equals(root)).toBe(true);
+      for (let i = 0; i < 20; i += 1) system.update([player], 0.05);
+      expect(system.debugSnapshot().actions).toHaveLength(0);
+      expect(player.mesh.position.equals(root)).toBe(true);
+    },
+  );
+
   it("reset clears poses and pending actions including invisible or no-longer-listed players", () => {
     const { player, system, rig } = fixture();
     system.trigger(player.id, "dive");

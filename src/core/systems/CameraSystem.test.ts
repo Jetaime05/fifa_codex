@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   clampCameraPosition,
   createCameraState,
+  getCameraRelativeDirection,
+  getCameraScreenRight,
   getCameraTargets,
   triggerGoalEmphasis,
   updateCamera
@@ -69,6 +71,20 @@ describe("CameraSystem", () => {
     expect(first.position.z).toBe(reverse.position.z);
     expect(first.position.distanceTo(reverse.position)).toBe(0);
     expect(first.position.toArray().every(Number.isFinite)).toBe(true);
+  });
+
+  it("uses the right-handed screen basis for sideline camera controls", () => {
+    // The broadcast camera sits on +X and looks toward -X. On screen, right
+    // therefore points toward -Z (the old up × forward basis pointed +Z).
+    const cameraForward = new THREE.Vector3(-1, -0.3, 0).normalize();
+    const screenRight = getCameraScreenRight(cameraForward);
+    expect(screenRight.dot(new THREE.Vector3(0, 0, -1))).toBeGreaterThan(0.99);
+    expect(screenRight.y).toBeCloseTo(0);
+
+    const rightInput = getCameraRelativeDirection(new THREE.Vector3(1, 0, 0), cameraForward);
+    const forwardInput = getCameraRelativeDirection(new THREE.Vector3(0, 0, 1), cameraForward);
+    expect(rightInput.dot(screenRight)).toBeGreaterThan(0.99);
+    expect(forwardInput.dot(cameraForward.clone().setY(0).normalize())).toBeGreaterThan(0.99);
   });
 
   it("anticipates bounded ball travel without sending the camera outside framing", () => {

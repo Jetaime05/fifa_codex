@@ -57,4 +57,35 @@ describe("DuelSystem", () => {
     const blocked = system.eligibility({ challenger: staggered, owner: other, ballPosition: new THREE.Vector3(0, 0.2, 0.8), now: 10.1 });
     expect(blocked.reason).toBe("recovery");
   });
+
+  it("clears cooldown and recovery state on reset", () => {
+    const system = new DuelSystem();
+    const owner = player("home-owner", "home", new THREE.Vector3(0, 0, 0), {
+      stats: { pace: 40, shooting: 40, passing: 40, dribbling: 25, defending: 20, physical: 25 }
+    });
+    const challenger = player("away-challenger", "away", new THREE.Vector3(0, 0, 0.95), {
+      velocity: new THREE.Vector3(0, 0, -2),
+      stats: { pace: 88, shooting: 50, passing: 50, dribbling: 40, defending: 95, physical: 95 }
+    });
+    const input = {
+      challenger,
+      owner,
+      ballPosition: new THREE.Vector3(0, 0.2, 0.84),
+      now: 10,
+      action: "poke" as const,
+      random: 1
+    };
+
+    const result = system.resolve(input);
+    expect(["won", "lost"]).toContain(result.status);
+    const blocked = system.eligibility({ ...input, now: 10.1 });
+    expect(blocked.eligible).toBe(false);
+    expect(["cooldown", "recovery"]).toContain(blocked.reason);
+
+    system.reset();
+    expect(system.eligibility({ ...input, now: 10.1 })).toMatchObject({
+      eligible: true,
+      reason: "eligible"
+    });
+  });
 });

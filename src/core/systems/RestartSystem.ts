@@ -9,6 +9,52 @@ const defaultDirections: AttackingDirections = { home: 1, away: -1 };
 const opposite = (team: TeamId): TeamId => team === "home" ? "away" : "home";
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
+export type GoalLineCrossing = {
+  /** Direction of travel toward the goal: +1 or -1 on the pitch z axis. */
+  direction: 1 | -1;
+  /** First point at which the whole ball is beyond the pitch goal line. */
+  position: THREE.Vector3;
+  /** Segment fraction for the crossing point. */
+  t: number;
+  /** Whole-ball goal-plane coordinate in the supplied field units. */
+  plane: number;
+};
+
+/**
+ * Sweeps a ball to the whole-ball goal line. The goal line is the pitch edge
+ * plus the ball radius; goal depth is presentation/scene geometry and must
+ * not delay adjudication or let a keeper rescue an already-scored ball.
+ */
+export function sweepGoalLineCrossing({ previousPosition, position, bounds, ballRadius, goalWidth, goalHeight = 4.8, direction }: {
+  previousPosition: THREE.Vector3;
+  position: THREE.Vector3;
+  bounds: FieldBounds;
+  ballRadius: number;
+  goalWidth: number;
+  goalHeight?: number;
+  direction?: number;
+}): GoalLineCrossing | null {
+  const radius = Math.max(0, Number.isFinite(ballRadius) ? ballRadius : 0);
+  const delta = position.z - previousPosition.z;
+  const side: 1 | -1 = (direction ?? Math.sign(delta)) < 0 ? -1 : 1;
+  const plane = bounds.halfLength + radius;
+  const before = previousPosition.z * side;
+  const after = position.z * side;
+  if (after < plane) return null;
+  const rawT = before >= plane
+    ? 0
+    : Math.abs(delta) < 0.000001
+      ? 1
+      : (side * plane - previousPosition.z) / delta;
+  if (rawT < 0 || rawT > 1) return null;
+  const t = clamp(rawT, 0, 1);
+  const crossingPosition = previousPosition.clone().lerp(position, t);
+  // The entire sphere must fit inside the posts and below the crossbar at the
+  // exact swept line. Equality is a post/crossbar contact, not a goal.
+  if (Math.abs(crossingPosition.x) + radius >= goalWidth / 2 || crossingPosition.y + radius >= goalHeight) return null;
+  return { direction: side, position: crossingPosition, t, plane };
+}
+
 export function createRestartPlan({ kind, team, position = new THREE.Vector3(), bounds, ballRadius = 0.55, attackingDirection = defaultDirections[team], reason = kind }: {
   kind: RestartKind; team: TeamId; position?: THREE.Vector3; bounds: FieldBounds;
   ballRadius?: number; attackingDirection?: number; reason?: string;
@@ -49,26 +95,16 @@ export function resolveOutOfPlay({ previousPosition, position, bounds, ballRadiu
     return { kind: "restart", restart: createRestartPlan({ kind: "throwIn", team: opposite(lastTouchTeam ?? "home"), position: point, bounds, ballRadius, reason: "Ball wholly crossed the touchline" }) };
   }
   const scoringTeam: TeamId = Math.sign(attackingDirections.home) === crossing.side ? "home" : "away";
-  const goalMouthAtEdge = Math.abs(point.x) + ballRadius < goalWidth / 2 && point.y + ballRadius < 4.8;
-  if (goalMouthAtEdge) {
-    // The pitch edge is outside the goal plane. Keep the ball live through
-    // the mouth so a keeper can make a physically reachable save before the
-    // whole ball crosses the depth of the goal. This also prevents a keeper
-    // save from teleporting a ball that has already scored.
-    const goalDepth = 0.8;
-    const goalPlane = bounds.halfLength + goalDepth;
-    const currentAlong = position.z * crossing.side;
-    if (currentAlong < goalPlane) return null;
-    const planeDelta = position.z - previousPosition.z;
-    const planeT = previousPosition.z * crossing.side >= goalPlane
-      ? 0
-      : planeDelta === 0
-        ? 1
-        : (crossing.side * goalPlane - previousPosition.z) / planeDelta;
-    const goalPoint = previousPosition.clone().lerp(position, clamp(planeT, 0, 1));
-    if (Math.abs(goalPoint.x) + ballRadius < goalWidth / 2 && goalPoint.y + ballRadius < 4.8) {
-      return { kind: "goal", team: scoringTeam, position: goalPoint };
-    }
+  const goalCrossing = sweepGoalLineCrossing({
+    previousPosition,
+    position,
+    bounds,
+    ballRadius,
+    goalWidth,
+    direction: crossing.side
+  });
+  if (goalCrossing) {
+    return { kind: "goal", team: scoringTeam, position: goalCrossing.position };
   }
   const defendingTeam = opposite(scoringTeam);
   const kind = lastTouchTeam === defendingTeam ? "corner" : "goalKick";

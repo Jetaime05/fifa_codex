@@ -29,13 +29,13 @@ For a small request, run only proportionate targeted tests first, but run the fu
 Snapshot updated: **2026-09-08**
 
 - Pre-checkpoint baseline: `7814941 Add durable Codex project handoff`, with `main` and `origin/main` aligned on 2026-09-07.
-- Latest accepted gameplay commit: `57291b8 Complete Phase 6 squad cards and tactics`; the newer commit adds handoff documentation only.
-- The current Phase 6.5 realism WIP checkpoint is the scope documented below. The owner requested a development freeze and checkpoint delivery; root owns review, final commit/push and Git verification, while Luna MAX owns implementation, integration and documentation edits.
+- The accepted Phase 6.5 implementation and documentation are delivered by the commit containing this snapshot. Verify the exact commit and `origin/main` alignment with Git before relying on repository history.
+- The Phase 6.5 realism checkpoint is accepted. Its delivered scope and evidence are documented below.
 - Phase 0 through Phase 6 are implemented, tested, PM-reviewed, committed, and pushed.
-- **Phase 6.5 — Football Realism is in progress and is not accepted.** Its current scope and evidence are recorded in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md).
-- **Phase 7 has not started.** The realism checkpoint must be reviewed and accepted before progression work resumes.
-- The last clean baseline regression was **232 tests across 39 files**. The frozen WIP verification then reported **261 passed / 262 total across 43 files, with one failure** in the existing distant/sharp-turn dribbling ownership expectation; this remains open and is not accepted as a passing phase gate.
-- The frozen WIP build passed TypeScript and Vite with a main bundle of about **721.69 kB minified / 198.46 kB gzip**. The Vite 500 kB advisory warning remains.
+- **Phase 6.5 — Football Realism is accepted.** Its delivered scope and evidence are recorded in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md).
+- **Phase 7 has not started, but may now begin.**
+- The accepted regression is **294 passed / 294 total across 48 files**. Independent re-review found no acceptance blocker.
+- The accepted production build passed TypeScript and Vite with a main bundle of **728.77 kB minified / 200.39 kB gzip**. The Vite 500 kB advisory warning remains.
 
 Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint delivery commit before relying on repository history.
 
@@ -50,8 +50,8 @@ Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint del
 | 4 | Accepted | Match flow, referee/rules, restarts, stats and full-time results | [`artifacts/phase4/QA.md`](./artifacts/phase4/QA.md) |
 | 5 | Accepted | Procedural presentation, stadium, animation, weather, goal effects and synthesized audio | [`artifacts/phase5/QA.md`](./artifacts/phase5/QA.md) |
 | 6 | Accepted | Squad/cards/tactics management, match integration and local persistence | [`artifacts/phase6/QA.md`](./artifacts/phase6/QA.md) |
-| 6.5 | **WIP — not accepted** | Football realism integration checkpoint | [`artifacts/realism/QA.md`](./artifacts/realism/QA.md) |
-| 7 | **Not started — follows the Phase 6.5 review gate** | Progression and game modes | `PROJECT_PLAN.md`, Phase 7 |
+| 6.5 | **Accepted** | Football realism integration: physical ball actions, duels, camera geometry, goal/keeper adjudication and aerial actions | [`artifacts/realism/QA.md`](./artifacts/realism/QA.md) |
+| 7 | **Not started — may now begin** | Progression and game modes | `PROJECT_PLAN.md`, Phase 7 |
 
 ## 4. What exists now
 
@@ -89,11 +89,12 @@ Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint del
 - Tactics change live spatial/AI behavior without increasing base movement speed; pressing remains capped at two AI players.
 - Versioned localStorage save/migration with malformed/read/write/quota diagnostics.
 
-### 2026-09-08 Phase 6.5 realism WIP checkpoint
+### 2026-09-08 Phase 6.5 realism — accepted
 
-- The current checkpoint contains shared ball scale tuning (`radius = 0.22`), timed ball-action phases, simulation-clock presentation hooks, impulse dribbling/first-touch continuity work, event-based duel/shielding code, receiver pass intent, a sideline broadcast camera, camera-relative controls and fictional preferred-foot/body metadata. The frozen review still has an open camera-right sign issue and an unaccepted goal-line/keeper adjudication change.
-- These changes are integration work in progress. The frozen test run has one open dribbling failure, and the cross-system runtime gate, final desktop/mobile browser review and root acceptance are pending.
-- Through/lob/cross/chip paths are partially wired in the current checkpoint (keyboard and touch handlers plus pass/shot planning hooks); the complete aerial loop (header, volley, contest, clearance and goalkeeper interception) is not claimed as delivered.
+- Delivered shared ball scale tuning (`radius = 0.22`), directional dribble reach, physical first-touch and duel orchestration, receiver intent/reachability, timed simulation-owned ball actions, reset/generation invalidation, single physical contact release, contact reach/height validation, and contact-synchronized presentation/audio.
+- Corrected camera-relative screen-right geometry for the sideline view, whole-ball goal-plane adjudication at `HALF_L + radius`, and the shared swept keeper-contact/goal seam. Integrated aerial header, volley, defensive clearance and goalkeeper claim paths without teleporting a ball already beyond the goal plane.
+- Final browser QA covered desktop rendering, pause clock hold, Squad Hub Play reset and kickoff, Broadcast/Follow camera switching, the 390×844 touch layout (all eight touch buttons and joystick in viewport, Lob triggering pass wind-up), reduced-motion toggle/class behavior, and an approximately two-minute sustained smoke. No console warnings or errors were observed. No screenshots or clips were saved.
+- Phase 6.5 is accepted on the evidence above. Phase 7 is permitted to start but remains unstarted.
 
 ## 5. Important files and ownership boundaries
 
@@ -126,14 +127,14 @@ Tests live next to systems. Cross-system phase gates use files such as `Phase4Ac
 - Phase 4 substitutions are only an eligibility/window placeholder, not a full bench substitution system.
 - Do not claim screenshots, videos, listening tests or device coverage that were not actually captured/performed.
 
-## 7. Next work: Phase 6.5 review, then Phase 7 — Progression and Modes
+## 7. Next work: Phase 7 — Progression and Modes
 
-### 2026-09-08 realism implementation checkpoint (WIP; not accepted)
+### 2026-09-08 realism checkpoint closeout
 
 - The original recommendations remain preserved in [`artifacts/realism/REVIEW.md`](./artifacts/realism/REVIEW.md).
-- The current implementation checkpoint is documented in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md). It records the actual checkpoint scope and separates targeted evidence from unverified runtime claims.
-- Root is review-only for this checkpoint: root ran the frozen regression/build, owns the remaining review findings, browser desktop and 390×844 review, and Git delivery. Luna MAX owns the implementation, integration and documentation edits for this checkpoint.
-- Phase 7 remains unstarted and must not be pulled into this realism work. See [`FUTURE_WORK.md`](./FUTURE_WORK.md) for deferred realism items.
+- The accepted implementation and evidence are documented in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md).
+- The accepted Phase 6.5 implementation and documentation are included in the delivery commit containing this snapshot. Verify current branch alignment rather than relying on a hard-coded commit hash.
+- Phase 7 may now start, but remains unstarted. See [`FUTURE_WORK.md`](./FUTURE_WORK.md) for deferred realism work.
 
 Read the complete Phase 7 section in `PROJECT_PLAN.md` before designing. Required scope:
 
@@ -188,7 +189,7 @@ The owner prefers parallel Luna agents for full phase implementation. When the u
 - There are normally four concurrency slots including the PM/root agent, so use at most three simultaneous sub-agents.
 - Give each agent a concrete, independent file ownership boundary to prevent shared-worktree conflicts.
 - Agents edit the same working tree. Do **not** cherry-pick their work.
-- For the active Phase 6.5 task, the user's role rule supersedes the older PM-owned integration wording: Luna MAX owns implementation, `src/main.ts` integration, cross-module fixes and Phase 6.5 documentation. Root is review-only and owns review findings, final full suite/build, browser QA, phase acceptance and Git delivery; root writes no gameplay or integration code for this checkpoint.
+- For the completed Phase 6.5 task, Luna agents delivered implementation and integration within their assigned boundaries; root completed independent re-review, full verification, browser QA, phase acceptance and retains final Git delivery ownership.
 - Do not infer that the dormant Phase 7 split below overrides this active rule. Confirm ownership again when Phase 7 starts.
 - Do not let multiple agents edit `src/main.ts`, `PROJECT_PLAN.md` or the same CSS/test file concurrently.
 - When an agent finishes early, reuse the slot for independent acceptance/review rather than starting overlapping implementation.

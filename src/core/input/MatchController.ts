@@ -12,7 +12,10 @@ export function cameraRelativeDirection(direction: THREE.Vector3, cameraForward:
   const forward = cameraForward.clone().setY(0);
   if (forward.lengthSq() < 0.000001) forward.set(0, 0, 1);
   else forward.normalize();
-  const right = new THREE.Vector3(0, 1, 0).cross(forward).normalize();
+  // Camera forward points from the lens into the pitch. Screen-right is the
+  // forward × world-up basis (the previous up × forward order mirrored
+  // horizontal controls in the sideline view).
+  const right = forward.clone().cross(new THREE.Vector3(0, 1, 0)).normalize();
   return right.multiplyScalar(direction.x).add(forward.multiplyScalar(direction.z));
 }
 

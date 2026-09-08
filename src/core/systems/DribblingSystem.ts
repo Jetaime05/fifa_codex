@@ -36,8 +36,12 @@ export type DribblingConfig = {
   touchForwardImpulse: number;
   /** Maximum horizontal touch impulse for a single contact. */
   maxTouchImpulse: number;
-  /** Additional horizontal distance a player can reach for a touch. */
+  /** Additional forward distance a player can reach for a touch. */
   touchReachMargin: number;
+  /** Side-to-side distance a planted foot can reach for a touch. */
+  touchLateralReach: number;
+  /** Small backward overlap allowed while the foot is recovering. */
+  touchBackwardReach: number;
   /** Per-touch loose-ball chance at the configured high-speed limit. */
   touchLossPerContact: number;
 };
@@ -58,6 +62,8 @@ export const DEFAULT_DRIBBLING_CONFIG: DribblingConfig = {
   touchForwardImpulse: 1.05,
   maxTouchImpulse: 12,
   touchReachMargin: 0.92,
+  touchLateralReach: 0.62,
+  touchBackwardReach: 0.24,
   touchLossPerContact: 0.28
 };
 
@@ -265,8 +271,17 @@ export function updateDribbling({
   const touchDue = resolvedMode === "impulse" && now + safeDt * 0.5 >= state.nextTouchAt;
   const horizontalBallOffset = ball.position.clone().sub(player.position);
   horizontalBallOffset.y = 0;
-  const maxReach = controlDistance + config.touchReachMargin;
-  const ballInReach = horizontalBallOffset.length() <= maxReach;
+  // A foot cannot reach an arbitrary point inside a radial circle. It can
+  // sweep farther along the player's travel direction than it can across the
+  // body, and only has a small backward overlap while recovering from a
+  // touch. This directional envelope is what makes a sharp turn expose a
+  // lagging ball instead of silently dragging it back to the new foot point.
+  const lateral = rightFromForward(forward);
+  const forwardOffset = horizontalBallOffset.dot(forward);
+  const lateralOffset = Math.abs(horizontalBallOffset.dot(lateral));
+  const ballInReach = forwardOffset >= -config.touchBackwardReach &&
+    forwardOffset <= controlDistance + config.touchReachMargin &&
+    lateralOffset <= config.touchLateralReach;
   // Legacy mode retains a frame-rate-independent hazard for old orchestrators.
   const legacyLooseTouchChance = safeDt > 0
     ? 1 - Math.pow(1 - looseTouchRisk, safeDt)

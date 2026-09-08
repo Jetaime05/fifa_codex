@@ -2,7 +2,7 @@ import * as THREE from "three";
 import type { PlayerData, TeamData } from "../data/types";
 import type { SimPlayer } from "../core/systems/types";
 
-export type PlayerAction = "kick" | "pass" | "shot" | "tackle" | "dive" | "celebrate";
+export type PlayerAction = "kick" | "pass" | "shot" | "clearance" | "header" | "volley" | "tackle" | "dive" | "celebrate";
 export type PreferredFoot = "left" | "right";
 export type ActionClock = "renderer" | "simulation";
 
@@ -78,8 +78,14 @@ bodyGeometry.setAttribute("skinWeight", new THREE.Float32BufferAttribute(bodySki
 const shirtNumberGeometry = new THREE.PlaneGeometry(0.46, 0.54);
 const markerGeometry = new THREE.RingGeometry(0.96, 1.15, 32);
 const rigs = new WeakMap<THREE.Group, PlayerRig>();
-const durations: Record<PlayerAction, number> = { kick: 0.48, pass: 0.42, shot: 0.62, tackle: 0.7, dive: 0.9, celebrate: 2.4 };
-const contactMarkers: Record<PlayerAction, number> = { kick: 0.46, pass: 0.5, shot: 0.44, tackle: 0.38, dive: 0.48, celebrate: 0.52 };
+const durations: Record<PlayerAction, number> = {
+  kick: 0.48, pass: 0.42, shot: 0.62, clearance: 0.52, header: 0.5, volley: 0.48,
+  tackle: 0.7, dive: 0.9, celebrate: 2.4
+};
+const contactMarkers: Record<PlayerAction, number> = {
+  kick: 0.46, pass: 0.5, shot: 0.44, clearance: 0.4, header: 0.34, volley: 0.4,
+  tackle: 0.38, dive: 0.48, celebrate: 0.52
+};
 
 function part(geometry: THREE.BufferGeometry, material: THREE.Material, parent: THREE.Object3D,
   x: number, y: number, z: number, sx: number, sy: number, sz: number) {
@@ -315,7 +321,8 @@ function getActionTarget(player: SimPlayer, rig: PlayerRig, action: ActionState)
     return target;
   }
   const contactFoot = resolveFoot(rig, action.preferredFoot);
-  const strength = action.action === "shot" ? 0.98 : action.action === "pass" ? 0.88 : 0.74;
+  const strength = action.action === "shot" || action.action === "volley" ? 0.98
+    : action.action === "pass" ? 0.88 : action.action === "clearance" ? 0.92 : 0.74;
   return new THREE.Vector3(contactFoot.leg.position.x, 0.12, contactFoot.leg.position.z + strength);
 }
 
@@ -325,7 +332,8 @@ function applyContactKick(player: SimPlayer, rig: PlayerRig, action: ActionState
   const target = getActionTarget(player, rig, action);
   const contactPose = solveFootPose(active.leg, active.knee, target);
   const contact = clamp01(action.contactAt, 0.5);
-  const strength = action.action === "shot" ? 1.24 : action.action === "pass" ? 0.92 : 0.78;
+  const strength = action.action === "shot" || action.action === "volley" ? 1.24
+    : action.action === "pass" ? 0.92 : action.action === "clearance" ? 1.08 : 0.78;
   const windup = clamp01(progress / Math.max(contact, 0.01));
   const follow = clamp01((progress - contact) / Math.max(1 - contact, 0.01));
   const reach = progress <= contact ? windup : 1 - follow;
@@ -511,10 +519,20 @@ export class PlayerAnimationSystem {
       const pulse = Math.sin(progress * Math.PI);
       const side = action.direction;
       switch (action.action) {
-        case "kick": case "pass": case "shot": {
+        case "kick": case "pass": case "shot": case "volley": case "clearance": {
           applyContactKick(player, rig, action, progress);
           break;
         }
+        case "header":
+          // Header contact is above the feet, so keep the root untouched and
+          // use only the presentation pose to show the jump/neck snap. The
+          // simulation owns the actual ball contact and impulse.
+          rig.pose.position.y = pulse * 0.28;
+          rig.pose.rotation.x = -pulse * 0.18;
+          rig.torso.rotation.x += pulse * 0.18;
+          rig.leftArm.rotation.z = -pulse * 0.32;
+          rig.rightArm.rotation.z = pulse * 0.32;
+          break;
         case "tackle":
           rig.pose.position.y = -0.68 * pulse;
           rig.pose.rotation.x = -0.42 * pulse;

@@ -157,6 +157,26 @@ describe("MatchAudio", () => {
     expect(audio.debugSnapshot().played).toBe(2);
   });
 
+  it("maps aerial contact semantics to one cue at the contact boundary", async () => {
+    const mock = fakeContext();
+    const audio = new MatchAudio({ contextFactory: mock.factory });
+    await audio.enable();
+    expect(audio.playActionContact("header", { strength: 1.1 })).toBe(true);
+    mock.context.currentTime += 1;
+    expect(audio.playActionContact("volley")).toBe(true);
+    mock.context.currentTime += 1;
+    expect(audio.playActionContact("clearance")).toBe(true);
+    expect(audio.debugSnapshot().played).toBe(3);
+  });
+
+  it("keeps a generic kick contact on the kick cue instead of the shot cue", async () => {
+    const mock = fakeContext();
+    const audio = new MatchAudio({ contextFactory: mock.factory });
+    await audio.enable();
+    expect(audio.playActionContact("kick")).toBe(true);
+    expect(mock.oscillators[mock.oscillators.length - 1].frequency.setValueAtTime.mock.calls[0][0]).toBe(145);
+  });
+
   it("does not retrigger envelopes when frame updates repeat the same state", async () => {
     const mock = fakeContext();
     const audio = new MatchAudio({ contextFactory: mock.factory });

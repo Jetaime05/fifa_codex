@@ -164,6 +164,32 @@ function getSafeForward(player: SimPlayer, playerForward: (player: SimPlayer) =>
   return forward.normalize();
 }
 
+function getHorizontalCameraForward(cameraForward: THREE.Vector3) {
+  const forward = cameraForward.clone();
+  forward.y = 0;
+  if (forward.lengthSq() < 0.000001) forward.set(0, 0, 1);
+  return forward.normalize();
+}
+
+/**
+ * Returns the world-space direction that appears on the camera's screen
+ * right. Three.js cameras look down local -Z, so the right-handed basis is
+ * `forward × up`; `up × forward` mirrors horizontal input for a sideline
+ * camera looking across the pitch.
+ */
+export function getCameraScreenRight(cameraForward: THREE.Vector3) {
+  return getHorizontalCameraForward(cameraForward)
+    .cross(new THREE.Vector3(0, 1, 0))
+    .normalize();
+}
+
+/** Maps an input stick's x/right and z/forward axes onto the camera frame. */
+export function getCameraRelativeDirection(direction: THREE.Vector3, cameraForward: THREE.Vector3) {
+  const forward = getHorizontalCameraForward(cameraForward);
+  return getCameraScreenRight(forward).multiplyScalar(direction.x)
+    .add(forward.multiplyScalar(direction.z));
+}
+
 export function getCameraTargets(
   mode: CameraMode,
   ball: SimBall,

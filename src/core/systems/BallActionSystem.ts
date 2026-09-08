@@ -54,6 +54,21 @@ export type BallActionSystemOptions = {
   maxQueuedPerOwner?: number;
 };
 
+/** A small vector shape keeps action acceptance independent of Three.js. */
+export type BallActionContactPoint = Readonly<{ x: number; y: number; z: number }>;
+
+export type BallActionContactInput = {
+  ownerId: string;
+  currentOwnerId: string | null | undefined;
+  ownerPosition: BallActionContactPoint;
+  ballPosition: BallActionContactPoint;
+  ballRadius: number;
+  /** Maximum horizontal distance between the striking player and ball. */
+  horizontalReach?: number;
+  /** Maximum ball-centre height offset from the settled ball height. */
+  verticalReach?: number;
+};
+
 const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
 
 const normalizeTiming = (
@@ -67,8 +82,10 @@ const normalizeTiming = (
 };
 
 const toOffsets = (prepareDuration: number, contactDuration: number, recoveryDuration: number): BallActionTiming => {
+  // Preparation begins as soon as the action is queued; the configured
+  // prepare value is the duration before contact, not a delayed prepare event.
   const prepare = 0;
-  const contact = prepare + Math.max(0, finite(contactDuration, 0));
+  const contact = Math.max(0, finite(prepareDuration, 0)) + Math.max(0, finite(contactDuration, 0));
   const recovery = contact + Math.max(0, finite(recoveryDuration, 0));
   return { prepare, contact, recovery };
 };
@@ -102,6 +119,29 @@ export function getBallActionTiming(
 }
 
 /**
+ * Validates the physical contact boundary used by the simulation orchestrator.
+ * Ownership is checked together with reach and height so a queued wind-up
+ * cannot release a ball after a turnover, restart or squad rebuild.
+ */
+export function isBallActionContactReachable(input: BallActionContactInput): boolean {
+  if (input.currentOwnerId !== input.ownerId) return false;
+  const values = [
+    input.ownerPosition.x, input.ownerPosition.y, input.ownerPosition.z,
+    input.ballPosition.x, input.ballPosition.y, input.ballPosition.z,
+    input.ballRadius
+  ];
+  if (!values.every(Number.isFinite)) return false;
+  const horizontalReach = Math.max(0, finite(input.horizontalReach ?? 1.7, 1.7));
+  const verticalReach = Math.max(0, finite(input.verticalReach ?? 1.65, 1.65));
+  const horizontalDistance = Math.hypot(
+    input.ownerPosition.x - input.ballPosition.x,
+    input.ownerPosition.z - input.ballPosition.z
+  );
+  const heightOffset = Math.abs(input.ballPosition.y - input.ballRadius);
+  return horizontalDistance <= horizontalReach + 0.000001 && heightOffset <= verticalReach + 0.000001;
+}
+
+/**
  * Queues simulation-owned action phases. The class never mutates a player or
  * ball; consumers apply the planned impulse when a contact event is emitted.
  * This makes animation/audio subscribers deterministic and lets an ownership
@@ -113,6 +153,7 @@ export class BallActionSystem {
   private readonly actions = new Map<number, { action: BallAction; emitted: Set<Exclude<BallActionPhase, "cancel">> }>();
   private readonly pendingEvents: BallActionEvent[] = [];
   private nextId = 1;
+  private resetGeneration = 0;
 
   constructor(options: BallActionSystemOptions = {}) {
     this.config = { ...DEFAULT_BALL_ACTION_TIMING_CONFIG, ...options.timing };
@@ -145,13 +186,14 @@ export class BallActionSystem {
   }
 
   /** Cancels every pending action owned by a player and returns cancellation events. */
-  cancelOwner(ownerId: string, reason: BallActionEvent["reason"] = "ownership-lost") {
+  cancelOwner(ownerId: string, reason: BallActionEvent["reason"] = "ownership-lost", timestamp?: number) {
     const events: BallActionEvent[] = [];
     for (const [id, entry] of this.actions) {
       if (entry.action.ownerId !== ownerId) continue;
-      const event = this.cancel(id, reason);
+      const event = this.cancel(id, reason, timestamp);
       if (event) events.push(event);
     }
+    events.sort((a, b) => a.action.id - b.action.id);
     return events;
   }
 
@@ -185,6 +227,12 @@ export class BallActionSystem {
 
   get activeCount() { return this.actions.size; }
 
+  /**
+   * Increments whenever a match/restart/squad reset invalidates queued work.
+   * Sidecar presentation state can retain the token and ignore stale events.
+   */
+  get generation() { return this.resetGeneration; }
+
   getActive(ownerId?: string) {
     return [...this.actions.values()]
       .map((entry) => entry.action)
@@ -192,9 +240,17 @@ export class BallActionSystem {
       .sort((a, b) => a.id - b.id);
   }
 
-  reset() {
+  reset(reason: BallActionEvent["reason"] = "cancelled", timestamp?: number) {
+    const cancelled: BallActionEvent[] = [];
+    for (const [id] of this.actions) {
+      const event = this.cancel(id, reason, timestamp);
+      if (event) cancelled.push(event);
+    }
     this.actions.clear();
     this.pendingEvents.length = 0;
     this.nextId = 1;
+    this.resetGeneration += 1;
+    cancelled.sort((a, b) => a.action.id - b.action.id);
+    return cancelled;
   }
 }

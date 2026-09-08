@@ -26,6 +26,10 @@ export type MatchAudioEventOptions = {
   distance?: number;
 };
 
+/** Semantic contact actions used by the simulation/presentation boundary. */
+export type MatchAudioContactAction =
+  | "kick" | "pass" | "cross" | "shot" | "header" | "volley" | "clearance" | "tackle" | "save";
+
 type Voice = { source: AudioScheduledSourceNode; gain: GainNode };
 
 /** Small, asset-free Web Audio mixer. Only enable() is allowed to create/unlock audio. */
@@ -162,6 +166,23 @@ export class MatchAudio {
 
   play(cue: MatchAudioCue): boolean {
     return this.playEvent(cue);
+  }
+
+  /**
+   * Map a physical contact to one authored cue. Callers invoke this from the
+   * simulation contact event, so a cross/header/volley never sounds during its
+   * wind-up and presentation/audio cannot drift to different phases.
+   */
+  playActionContact(action: MatchAudioContactAction, options: MatchAudioEventOptions = {}): boolean {
+    let cue: MatchAudioCue;
+    switch (action) {
+      case "pass": case "cross": cue = "pass"; break;
+      case "tackle": cue = "tackle"; break;
+      case "save": cue = "save"; break;
+      case "kick": case "clearance": cue = "kick"; break;
+      case "shot": case "header": case "volley": cue = "shot"; break;
+    }
+    return this.playEvent(cue, options);
   }
 
   /**

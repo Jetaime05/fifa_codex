@@ -193,4 +193,21 @@ describe("DribblingSystem", () => {
     expect(result.touchApplied).toBe(false);
     expect(ball.velocity.length()).toBe(0);
   });
+
+  it("resets cadence state so a new possession can make its first contact immediately", () => {
+    const system = new DribblingSystem({ mode: "impulse" });
+    const player = createPlayer(85);
+    const ball = createBall();
+    ball.position.copy(player.position).add(new THREE.Vector3(0, 0.22, 0.82));
+
+    const first = system.update({ player, ball, dt: 1 / 60, now: 0, mode: "impulse", random: () => 1 });
+    expect(first.touchApplied).toBe(true);
+    expect(first.touchCount).toBe(1);
+
+    system.reset(player.id);
+    ball.position.copy(player.position).add(new THREE.Vector3(0, 0.22, 0.82));
+    const afterReset = system.update({ player, ball, dt: 1 / 60, now: 0.01, mode: "impulse", random: () => 1 });
+    expect(afterReset.touchApplied).toBe(true);
+    expect(afterReset.touchCount).toBe(1);
+  });
 });

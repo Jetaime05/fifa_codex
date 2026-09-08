@@ -15,7 +15,7 @@ describe("MatchController", () => {
     const right = cameraRelativeDirection(new THREE.Vector3(1, 0, 0), forward);
     const up = cameraRelativeDirection(new THREE.Vector3(0, 0, 1), forward);
     expect(right.y).toBeCloseTo(0);
-    expect(right.dot(new THREE.Vector3(0, 0, 1))).toBeGreaterThan(0.99);
+    expect(right.dot(new THREE.Vector3(0, 0, -1))).toBeGreaterThan(0.99);
     expect(up.dot(forward.clone().setY(0).normalize())).toBeGreaterThan(0.99);
   });
 });

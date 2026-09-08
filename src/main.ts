@@ -11,6 +11,9 @@ import {
 } from "./core/match/MatchState";
 import type { CameraMode } from "./core/match/MatchState";
 import { applyBallTrajectory, kickBall, updateBallPhysics } from "./core/systems/BallSystem";
+import { isAerialBallAirborne, resolveAerialContest } from "./core/systems/AerialSystem";
+import type { AerialContestResult } from "./core/systems/AerialSystem";
+import { adjudicateKeeperGoalLine } from "./core/systems/GoalkeeperContact";
 import { separatePlayers as separatePlayerCollisions } from "./core/systems/CollisionSystem";
 import { DEFAULT_MOVEMENT_CONFIG, updatePlayerMovement as updateMovementSystem } from "./core/systems/MovementSystem";
 import type { MovementResult } from "./core/systems/MovementSystem";
@@ -337,6 +340,12 @@ let lastShotPlan: ShotPlan | null = null;
 let lastKeeperResult: KeeperSaveResult | null = null;
 let lastFeedback: PassFeedbackEvent | ShotFeedbackEvent | null = null;
 let pendingShot: { plan: ShotPlan; defendingTeam: TeamId; keeperAttempted?: boolean } | null = null;
+let pendingAerial: {
+  attackingTeam: TeamId;
+  target: THREE.Vector3;
+  expiresAt: number;
+} | null = null;
+let lastAerialResult: AerialContestResult | null = null;
 let lastBallPositionBeforePhysics = new THREE.Vector3();
 let goalMouthEntryPosition: THREE.Vector3 | null = null;
 let lastCameraEmphasis = 0;
@@ -500,6 +509,7 @@ function resetMatch() {
   lastTouch = null;
   attackingTeam = "home";
   pendingShot = null;
+  pendingAerial = null;
   pendingPass = null;
   pendingPassExpiresAt = 0;
   releaseLock = null;
@@ -512,6 +522,7 @@ function resetMatch() {
   lastPassPlan = null;
   lastShotPlan = null;
   lastKeeperResult = null;
+  lastAerialResult = null;
   lastFeedback = null;
   lastCameraEmphasis = 0;
   actionChip.textContent = "Ready";
@@ -546,6 +557,7 @@ function prepareRestart(plan: RestartPlan, startCountdown = true) {
   pendingPass = null;
   pendingPassExpiresAt = 0;
   pendingShot = null;
+  pendingAerial = null;
   goalMouthEntryPosition = null;
   releaseLock = null;
   referee.clearPending();
@@ -614,6 +626,10 @@ function attachBallTo(player: Player, options: { preserveVelocity?: boolean; pre
   const offside = referee.onTouch(player);
   if (offside) { prepareRestart(offside); return false; }
   pendingShot = null;
+  // A controlled touch ends any pending lob/cross contest window. Aerial
+  // outcomes that remain loose clear this explicitly after applying their
+  // impulse, so an ordinary grounded first touch cannot be re-contested.
+  pendingAerial = null;
   if (ballOwner && ballOwner !== player) cancelBallActionsFor(ballOwner.id, "ownership-lost");
   if (pendingPass) {
     if (player.team === pendingPass.team && player.id !== pendingPass.passerId) {
@@ -660,6 +676,13 @@ function cancelBallActionsFor(ownerId: string, reason: BallActionEvent["reason"]
     playerAnimations.cancelAction(entry.playerId);
     queuedBallActions.delete(id);
   }
+}
+
+function cancelQueuedBallAction(id: number, playerId: string, reason: BallActionEvent["reason"] = "cancelled") {
+  const event = ballActions.cancel(id, reason, actionClockSeconds);
+  if (event) recordBallActionEvent(event);
+  playerAnimations.cancelAction(playerId);
+  queuedBallActions.delete(id);
 }
 
 function invalidateBallActions(reason: BallActionEvent["reason"] = "cancelled") {
@@ -728,11 +751,15 @@ function queueBallAction(player: Player, kind: BallActionKind, options: QueueBal
   return action;
 }
 
-function triggerContactPresentation(player: Player, kind: BallActionKind) {
+function triggerContactPresentation(player: Player, kind: BallActionKind, elapsed?: number) {
   if (reducedMotion) return;
   const action = kind === "shot" || kind === "volley" || kind === "header" ? "shot"
     : kind === "clearance" ? "kick" : kind === "cross" ? "pass" : "pass";
-  playerAnimations.syncActionContact(player.id, { contactTarget: ball.position.clone() });
+  playerAnimations.syncActionContact(player.id, {
+    elapsed,
+    contactTarget: ball.position.clone(),
+    preferredFoot: player.preferredFoot === "left" ? "left" : "right"
+  });
   void action;
 }
 
@@ -788,8 +815,7 @@ function processBallActionEvents() {
     if (queued.passPlan) {
       const receiver = teamPlayers(player.team).find((candidate) => candidate.id === queued.passPlan!.target.id && candidate !== player);
       if (!receiver) {
-        playerAnimations.cancelAction(player.id);
-        queuedBallActions.delete(event.action.id);
+        cancelQueuedBallAction(event.action.id, player.id);
         continue;
       }
       const currentPlan = createPassPlan({
@@ -803,8 +829,7 @@ function processBallActionEvents() {
         random: rand
       });
       if (!currentPlan) {
-        playerAnimations.cancelAction(player.id);
-        queuedBallActions.delete(event.action.id);
+        cancelQueuedBallAction(event.action.id, player.id);
         continue;
       }
       queued.passPlan = currentPlan;
@@ -813,12 +838,19 @@ function processBallActionEvents() {
       applyPassPlan(ball, currentPlan);
       pendingPass = { passerId: player.id, team: player.team, targetId: currentPlan.target.id };
       pendingPassExpiresAt = actionClockSeconds + Math.max(0.8, currentPlan.trajectory.travelTime + 0.55);
+      pendingAerial = currentPlan.trajectory.style === "lob" || currentPlan.trajectory.style === "cross"
+        ? {
+          attackingTeam: player.team,
+          target: currentPlan.trajectory.target.clone(),
+          expiresAt: actionClockSeconds + Math.max(1, currentPlan.trajectory.travelTime + 0.75)
+        }
+        : null;
       pendingShot = null;
       releaseLock = { playerId: player.id, remaining: 0.22 };
       matchStats.record(player.team, "passes");
       releaseBall(event.action.id);
-      triggerContactPresentation(player, queued.kind);
-      matchAudio.play("pass");
+      triggerContactPresentation(player, queued.kind, event.action.timing.contact);
+      matchAudio.playActionContact(queued.kind === "cross" ? "cross" : "pass", { strength: currentPlan.feedback.intensity });
       actionChip.textContent = currentPlan.interception.interceptable
         ? `Pass risk ${Math.round(currentPlan.feedback.interceptionRisk * 100)}%`
         : `Pass to ${currentPlan.target.short}`;
@@ -837,8 +869,7 @@ function processBallActionEvents() {
         random: rand
       });
       if (!currentPlan) {
-        playerAnimations.cancelAction(player.id);
-        queuedBallActions.delete(event.action.id);
+        cancelQueuedBallAction(event.action.id, player.id);
         continue;
       }
       queued.shotPlan = currentPlan;
@@ -846,13 +877,14 @@ function processBallActionEvents() {
       applyShotPlan(ball, currentPlan);
       pendingPass = null;
       pendingPassExpiresAt = 0;
+      pendingAerial = null;
       releaseLock = { playerId: player.id, remaining: 0.22 };
       matchStats.record(player.team, "shots");
       pendingShot = { plan: currentPlan, defendingTeam };
       releaseBall(event.action.id);
-      triggerContactPresentation(player, queued.kind);
+      triggerContactPresentation(player, queued.kind, event.action.timing.contact);
       stadium.shot(ball.position);
-      matchAudio.play("shot");
+      matchAudio.playActionContact("shot", { strength: currentPlan.feedback.intensity });
       actionChip.textContent = `${currentPlan.shotType === "power" ? "Power" : "Finesse"} ${Math.round(currentPlan.accuracy * 100)}%`;
       addMatchEvent(matchState, "shot", `${player.short} takes a ${currentPlan.shotType} shot.`);
       addFeed(`${player.short} hits a ${currentPlan.shotType} shot toward the ${currentPlan.selectedTarget.side} side.`);
@@ -860,8 +892,8 @@ function processBallActionEvents() {
       releaseLock = { playerId: player.id, remaining: 0.22 };
       releaseBall(event.action.id);
       kickBall(ball, queued.clearance.target, queued.clearance.strength, queued.clearance.lift);
-      triggerContactPresentation(player, queued.kind);
-      matchAudio.play("kick");
+      triggerContactPresentation(player, queued.kind, event.action.timing.contact);
+      matchAudio.playActionContact("clearance", { strength: 1.05 });
       matchStats.record(player.team, "clearances");
       actionChip.textContent = "Clearance into space";
       addMatchEvent(matchState, "pass", `${player.short} clears under pressure.`);
@@ -1107,6 +1139,7 @@ function clearBall(player: Player) {
   pendingPass = null;
   pendingPassExpiresAt = 0;
   pendingShot = null;
+  pendingAerial = null;
   lastFeedback = null;
   queueBallAction(player, "clearance", { clearance: { target, strength: 30, lift: 2.8 } });
 }
@@ -1222,45 +1255,38 @@ function updateBall(dt: number) {
   }
 }
 
-function firstSegmentSphereContact(start: THREE.Vector3, end: THREE.Vector3, center: THREE.Vector3, radius: number) {
-  const segment = end.clone().sub(start);
-  const offset = start.clone().sub(center);
-  const a = segment.lengthSq();
-  const radiusSq = radius * radius;
-  if (offset.lengthSq() <= radiusSq) return { t: 0, point: start.clone() };
-  if (a <= 0.000001) return null;
-  const b = 2 * offset.dot(segment);
-  const c = offset.lengthSq() - radiusSq;
-  const discriminant = b * b - 4 * a * c;
-  if (discriminant < 0) return null;
-  const root = Math.sqrt(Math.max(0, discriminant));
-  const t = (-b - root) / (2 * a);
-  if (t < 0 || t > 1) return null;
-  return { t, point: start.clone().lerp(end, t) };
-}
-
 function keeperContactBeforeGoalPlane(team: TeamId) {
   const pending = pendingShot;
   if (!pending || pending.plan.shooter.team !== team) return null;
   const direction = team === "home" ? 1 : -1;
-  const plane = HALF_L + 0.8;
-  const start = goalMouthEntryPosition?.clone() ?? lastBallPositionBeforePhysics.clone();
+  // The keeper may only touch a shot before the whole ball crosses the goal
+  // line. The old goal-depth plane (+0.8) allowed a late callback to move an
+  // already-scored ball back to the keeper.
+  const plane = HALF_L + BALL_RADIUS;
+  const start = lastBallPositionBeforePhysics.clone();
   const end = ball.position.clone();
-  const startAlong = start.z * direction;
-  const endAlong = end.z * direction;
-  if (startAlong >= plane || endAlong < plane) return null;
-  const planeDelta = end.z - start.z;
-  const planeT = planeDelta === 0 ? 1 : clamp((direction * plane - start.z) / planeDelta, 0, 1);
   const keeper = teamPlayers(pending.defendingTeam).find((player) => player.role === "GK");
   if (!keeper) return null;
   const reach = goalkeeperSystem.config.baseReach + clamp(keeper.stats.physical / 100, 0, 1) * goalkeeperSystem.config.reachStatScale + BALL_RADIUS;
-  const contact = firstSegmentSphereContact(start, end, keeper.position.clone().setY(1.25), reach);
-  if (!contact || contact.t > planeT + 0.0001 || contact.point.y > 4.8) return null;
-  return { keeper, point: contact.point, t: contact.t };
+  const decision = adjudicateKeeperGoalLine({
+    start,
+    end,
+    keeperCenter: keeper.position.clone().setY(1.25),
+    reach,
+    goalSide: direction,
+    wholeBallGoalPlane: plane,
+    maxContactHeight: 4.8
+  });
+  if (decision.kind !== "keeper-contact") return null;
+  return { keeper, point: decision.contact.point, t: decision.contact.time };
 }
 
 function scoreGoal(team: TeamId) {
   if (matchState.status !== "playing") return;
+  // A goal ends the live phase immediately. Do not let a shooter's recovery
+  // event survive into the goal/kickoff states or fire after a squad reset.
+  invalidateBallActions("cancelled");
+  pendingAerial = null;
   if (pendingShot && pendingShot.plan.shooter.team !== team) {
     pendingShot = null;
   }
@@ -1334,6 +1360,10 @@ function resolveGoalkeeperSave(scoringTeam: TeamId) {
   if (lastKeeperResult.outcome === "goal") {
     return false;
   }
+  // A save/parry is a terminal contact for the shot action. Cancel the
+  // shooter's recovery event before giving the keeper the ball or rebound.
+  invalidateBallActions("ownership-lost");
+  pendingAerial = null;
   pendingShot = null;
 
   matchStats.record(keeper.team, "saves");
@@ -1391,7 +1421,85 @@ function resolvePassiveDuel() {
   return false;
 }
 
+/** Resolve one cross/lob arrival before generic grounded possession claims it. */
+function resolveAerialPlay() {
+  const pending = pendingAerial;
+  if (!pending || ballOwner) return false;
+  if (actionClockSeconds > pending.expiresAt) {
+    pendingAerial = null;
+    return false;
+  }
+  const goalTarget = new THREE.Vector3(0, 1.8, pending.attackingTeam === "home" ? HALF_L + 1.4 : -HALF_L - 1.4);
+  const result = resolveAerialContest({
+    ball,
+    players: eligiblePlayers(),
+    attackingTeam: pending.attackingTeam,
+    target: pending.target,
+    goalTarget
+  });
+  if (!result) return false;
+
+  const player = result.player as Player;
+  const receivedPass = pendingPass && pendingPass.team === player.team;
+  pendingAerial = null;
+  pendingPass = null;
+  pendingPassExpiresAt = 0;
+  pendingShot = null;
+  lastAerialResult = result;
+  lastTouch = player;
+  // The cross action's recovery is no longer live once a player makes the
+  // aerial contact. This also prevents a reset/squad Play from replaying it.
+  invalidateBallActions("ownership-lost");
+
+  ball.position.copy(result.point);
+  ball.mesh.position.copy(ball.position);
+  if (receivedPass && player.team === pending.attackingTeam) matchStats.record(player.team, "completedPasses");
+
+  if (result.action === "keeperClaim") {
+    matchStats.record(player.team, "saves");
+    matchAudio.playActionContact("save", { strength: 0.95 });
+    playerAnimations.trigger(player.id, "dive", player.position.x >= ball.position.x ? -1 : 1);
+    // A clean claim consumes the incoming flight; never carry the cross's
+    // velocity through the keeper's controlled touch.
+    attachBallTo(player);
+    actionChip.textContent = "Keeper claims cross";
+    addMatchEvent(matchState, "shot", `${player.short} claims the aerial ball.`);
+    addFeed(`${player.short} claims the cross.`);
+    return true;
+  }
+
+  releaseBall();
+  applyBallTrajectory(ball, result.velocity);
+  const presentationAction = result.action as "header" | "volley" | "clearance";
+  playerAnimations.startAction(player.id, presentationAction, {
+    clock: "renderer",
+    duration: presentationAction === "header" ? 0.5 : 0.48,
+    contactAt: 0.02,
+    contactTarget: result.point.clone(),
+    preferredFoot: player.preferredFoot === "left" ? "left" : "right"
+  });
+  matchAudio.playActionContact(presentationAction, {
+    strength: presentationAction === "clearance" ? 1.05 : 1
+  });
+  if (presentationAction === "clearance") {
+    matchStats.record(player.team, "clearances");
+    actionChip.textContent = "Aerial clearance";
+    addMatchEvent(matchState, "pass", `${player.short} clears the cross.`);
+    addFeed(`${player.short} heads the ball clear.`);
+  } else {
+    matchStats.record(player.team, "shots");
+    actionChip.textContent = presentationAction === "header" ? "Header" : "Volley";
+    addMatchEvent(matchState, "shot", `${player.short} meets the ball with a ${presentationAction}.`);
+    addFeed(`${player.short} connects with a ${presentationAction}.`);
+  }
+  return true;
+}
+
 function resolvePossession() {
+  if (resolveAerialPlay()) return;
+  // Keep an airborne cross/lob out of the grounded possession resolver until
+  // it reaches a contest window or falls back to the pitch.
+  if (pendingAerial && isAerialBallAirborne(ball, BALL_RADIUS)) return;
   if (pendingShot && !isBallApproachingGoal(ball, pendingShot.defendingTeam)) pendingShot = null;
   // Incoming shots use the keeper's reaction/save model once, never the
   // generic loose-ball claim. A beaten keeper cannot re-roll at the goal line.
@@ -1557,6 +1665,12 @@ function phase2DebugState() {
       type: lastFeedback.type,
       kind: lastFeedback.kind,
       effect: lastFeedback.effect
+    } : null,
+    aerial: lastAerialResult ? {
+      action: lastAerialResult.action,
+      playerId: lastAerialResult.player.id,
+      score: lastAerialResult.score,
+      candidates: lastAerialResult.candidates.length
     } : null
   };
 }
