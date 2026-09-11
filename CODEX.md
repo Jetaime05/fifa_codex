@@ -26,16 +26,15 @@ For a small request, run only proportionate targeted tests first, but run the fu
 
 ## 2. Authoritative current status
 
-Snapshot updated: **2026-09-08**
+Snapshot updated: **2026-09-11**
 
 - Pre-checkpoint baseline: `7814941 Add durable Codex project handoff`, with `main` and `origin/main` aligned on 2026-09-07.
-- The accepted Phase 6.5 implementation and documentation are delivered by the commit containing this snapshot. Verify the exact commit and `origin/main` alignment with Git before relying on repository history.
-- The Phase 6.5 realism checkpoint is accepted. Its delivered scope and evidence are documented below.
-- Phase 0 through Phase 6 are implemented, tested, PM-reviewed, committed, and pushed.
+- Phase 0 through Phase 6.5 are implemented, tested, PM-reviewed, committed, and pushed at `8a6ee8c`.
 - **Phase 6.5 — Football Realism is accepted.** Its delivered scope and evidence are recorded in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md).
-- **Phase 7 has not started, but may now begin.**
-- The accepted regression is **294 passed / 294 total across 48 files**. Independent re-review found no acceptance blocker.
-- The accepted production build passed TypeScript and Vite with a main bundle of **728.77 kB minified / 200.39 kB gzip**. The Vite 500 kB advisory warning remains.
+- **Phase 7 — Progression and Modes is accepted in the current working tree.** It is tested and PM/browser reviewed but remains uncommitted until the owner requests Git delivery. Evidence is in [`artifacts/phase7/QA.md`](./artifacts/phase7/QA.md).
+- **Phase 8 has not started.**
+- The accepted regression is **339 passed / 339 total across 56 files**. Independent re-review found no acceptance blocker.
+- The accepted production build passed TypeScript and Vite with a main bundle of **792.81 kB minified / 220.31 kB gzip**. The Vite 500 kB advisory warning remains.
 
 Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint delivery commit before relying on repository history.
 
@@ -51,7 +50,8 @@ Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint del
 | 5 | Accepted | Procedural presentation, stadium, animation, weather, goal effects and synthesized audio | [`artifacts/phase5/QA.md`](./artifacts/phase5/QA.md) |
 | 6 | Accepted | Squad/cards/tactics management, match integration and local persistence | [`artifacts/phase6/QA.md`](./artifacts/phase6/QA.md) |
 | 6.5 | **Accepted** | Football realism integration: physical ball actions, duels, camera geometry, goal/keeper adjudication and aerial actions | [`artifacts/realism/QA.md`](./artifacts/realism/QA.md) |
-| 7 | **Not started — may now begin** | Progression and game modes | `PROJECT_PLAN.md`, Phase 7 |
+| 7 | **Accepted — uncommitted** | Offline rewards, card upgrades, missions, six-fixture Season and versioned local persistence | [`artifacts/phase7/QA.md`](./artifacts/phase7/QA.md) |
+| 8 | **Not started** | Online foundation | `PROJECT_PLAN.md`, Phase 8 |
 
 ## 4. What exists now
 
@@ -94,7 +94,16 @@ Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint del
 - Delivered shared ball scale tuning (`radius = 0.22`), directional dribble reach, physical first-touch and duel orchestration, receiver intent/reachability, timed simulation-owned ball actions, reset/generation invalidation, single physical contact release, contact reach/height validation, and contact-synchronized presentation/audio.
 - Corrected camera-relative screen-right geometry for the sideline view, whole-ball goal-plane adjudication at `HALF_L + radius`, and the shared swept keeper-contact/goal seam. Integrated aerial header, volley, defensive clearance and goalkeeper claim paths without teleporting a ball already beyond the goal plane.
 - Final browser QA covered desktop rendering, pause clock hold, Squad Hub Play reset and kickoff, Broadcast/Follow camera switching, the 390×844 touch layout (all eight touch buttons and joystick in viewport, Lob triggering pass wind-up), reduced-motion toggle/class behavior, and an approximately two-minute sustained smoke. No console warnings or errors were observed. No screenshots or clips were saved.
-- Phase 6.5 is accepted on the evidence above. Phase 7 is permitted to start but remains unstarted.
+- Phase 6.5 remains accepted on the evidence above; Phase 7 was subsequently accepted on 2026-09-11.
+
+### 2026-09-11 Phase 7 progression and modes — accepted
+
+- Match completion now settles deterministic Coins/XP/performance rewards exactly once and awards XP to a real squad card.
+- Confirmed card upgrades spend Coins, raise additive card attributes and feed the stronger catalog through `buildMatchTeamData` on the next match.
+- Daily, weekly and per-match missions consume real completed-match stats, use deterministic period keys and expose explicit idempotent claims.
+- The extra offline mode is a six-fixture deterministic Season with persistent fixtures, standings, placement/champion state and a completion reward.
+- The responsive Progression Hub connects Quick Match, Season, rewards, missions and upgrades. Settings, progression, missions and Season each use migration-safe local schemas while retaining the existing squad save.
+- Accepted browser QA covered desktop, 390×844, a completed 30-second Quick Match, reward display, mission claim, confirmed card upgrade, Season start/continue, cross-tab persistence and an empty warning/error console. No screenshots or clips were saved.
 
 ## 5. Important files and ownership boundaries
 
@@ -104,6 +113,11 @@ Treat `7814941` as the pre-checkpoint baseline; inspect the newer checkpoint del
 - `src/management/types.ts` — Phase 6 management schema.
 - `src/management/SquadSystem.ts` — squad store, persistence, formations, OVR, chemistry, validation and match-data conversion.
 - `src/management/SquadUI.ts` / `SquadUI.css` — accessible responsive management overlay.
+- `src/progression/` — Phase 7 rewards, exactly-once settlement, card XP/upgrades and persistent economy store.
+- `src/missions/` — deterministic daily/weekly/match mission definitions, tracking and claims.
+- `src/modes/SeasonMode.ts` — deterministic persistent six-fixture offline Season.
+- `src/phase7ui/` — responsive progression/mode dashboard with dependency-injected callbacks.
+- `src/phase7/` — root integration acceptance plus safe mission/settings persistence adapters.
 - `src/data/fictionalSquadCards.ts` — current card catalog extension.
 - `src/data/teams.ts` — original match team data.
 - `src/rendering/` — scene/stadium/player presentation. Player rig geometry is shared; do not dispose it when replacing only the home XI.
@@ -123,20 +137,23 @@ Tests live next to systems. Cross-system phase gates use files such as `Phase4Ac
 - Card-id player instructions must be mapped to runtime IDs like `home-2` before AI evaluation.
 - Configured home set-piece card IDs must map to runtime player IDs; an unavailable taker falls back safely.
 - localStorage access can throw or contain malformed data; never make app startup depend on successful storage.
+- Match settlement, mission processing/claims and Season results/rewards are keyed by stable IDs and must remain exactly-once across reloads.
+- Player upgrades must be applied to a cloned card catalog passed into SquadSystem/match building; never mutate the source catalog.
 - All current added player/card art is fictional or generic. Do not add licensed logos, kits, likeness art or scraped assets.
 - Phase 4 substitutions are only an eligibility/window placeholder, not a full bench substitution system.
 - Do not claim screenshots, videos, listening tests or device coverage that were not actually captured/performed.
 
-## 7. Next work: Phase 7 — Progression and Modes
+## 7. Phase 7 closeout and next work: Phase 8
 
 ### 2026-09-08 realism checkpoint closeout
 
 - The original recommendations remain preserved in [`artifacts/realism/REVIEW.md`](./artifacts/realism/REVIEW.md).
 - The accepted implementation and evidence are documented in [`artifacts/realism/QA.md`](./artifacts/realism/QA.md).
 - The accepted Phase 6.5 implementation and documentation are included in the delivery commit containing this snapshot. Verify current branch alignment rather than relying on a hard-coded commit hash.
-- Phase 7 may now start, but remains unstarted. See [`FUTURE_WORK.md`](./FUTURE_WORK.md) for deferred realism work.
+- Phase 7 is accepted in the current working tree. Commit/push only when the owner requests Git delivery.
+- Phase 8 is next but has not started. It introduces backend/auth/cloud/network scope and must not be inferred from this Phase 7 delivery.
 
-Read the complete Phase 7 section in `PROJECT_PLAN.md` before designing. Required scope:
+Accepted Phase 7 scope:
 
 ### 7A Reward loop
 
@@ -169,9 +186,9 @@ Read the complete Phase 7 section in `PROJECT_PLAN.md` before designing. Require
 - Refresh must preserve progression.
 - Use a versioned, migration-safe local schema. Decide whether to compose with or migrate the existing Phase 6 squad key; do not silently orphan existing saves.
 
-Phase 7 gate: **play match → earn rewards → upgrade a card → see a stronger squad**, persisted locally, plus at least one extra playable mode and no backend.
+Phase 7 gate: **accepted** — play match → earn rewards → upgrade a card → see a stronger squad, persisted locally, plus a playable Season and no backend.
 
-Suggested implementation order:
+Delivered implementation order:
 
 1. Define a versioned progression/mode domain and migration plan.
 2. Implement reward calculation and exactly-once match settlement.
@@ -194,12 +211,12 @@ The owner prefers parallel Luna agents for full phase implementation. When the u
 - Do not let multiple agents edit `src/main.ts`, `PROJECT_PLAN.md` or the same CSS/test file concurrently.
 - When an agent finishes early, reuse the slot for independent acceptance/review rather than starting overlapping implementation.
 
-Suggested initial Phase 7 split (adjust after inspecting current APIs):
+Completed Phase 7 split (historical reference):
 
-- **Luna A — progression domain:** rewards, currency, card XP/upgrades, versioned store and unit tests. Own new `src/progression/` domain files only.
-- **Luna B — missions:** definitions, event/progress/claim logic and unit tests. Own new mission-domain files only.
-- **Luna C — modes/UI foundation:** one extra local mode plus progression/mode UI components and focused tests; agree exact folders before editing.
-- **Root PM when Phase 7 is explicitly resumed:** schema contract, existing SquadSystem compatibility, `main.ts` match settlement/integration, final UX fixes, acceptance tests and QA docs. This dormant plan does not override the active Phase 6.5 ownership above.
+- **Luna A — progression domain:** delivered `src/progression/` rewards, currency, card XP/upgrades, versioned store and tests.
+- **Luna B — missions:** delivered `src/missions/` definitions, event/progress/claim logic and tests.
+- **Luna C — modes/UI:** delivered `src/modes/` Season and `src/phase7ui/` responsive UI foundation and tests.
+- **Root PM:** delivered settings/mission persistence integration, `main.ts` match settlement and UI wiring, Phase 7 acceptance tests, browser QA and documentation.
 
 Before dispatching agents, root must publish shared interfaces and file ownership. If APIs are not stable, ask agents to build pure modules first and defer integration.
 

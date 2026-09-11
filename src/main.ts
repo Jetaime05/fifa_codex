@@ -58,8 +58,19 @@ import { PlayerAnimationSystem } from "./rendering/PlayerPresentation";
 import { MatchAudio, type MatchAudioCue } from "./audio/MatchAudio";
 import { manCity, realMadrid } from "./data/teams";
 import type { PlayerData, TeamData, TeamId } from "./data/types";
-import { buildMatchTeamData, chemistry, createSquadStore, homeSquadCards, teamOverall, validateSquad } from "./management/SquadSystem";
+import { buildMatchTeamData, calculateCardOverall, chemistry, createSquadStore, homeSquadCards, teamOverall, validateSquad } from "./management/SquadSystem";
 import { SquadUI } from "./management/SquadUI";
+import {
+  applyProgressionToCards,
+  createProgressionStore,
+  type MatchOutcome,
+  type MatchReward
+} from "./progression";
+import { createSeasonModeStore, type SeasonFixture } from "./modes";
+import { createSettingsStore } from "./phase7/SettingsStore";
+import { createPersistentMissions } from "./phase7/MissionPersistence";
+import { reconcileExternalRewards } from "./phase7/ExternalRewardReconciliation";
+import { Phase7UI, type Phase7ViewModel } from "./phase7ui/Phase7UI";
 import "./styles.css";
 import "./management/SquadUI.css";
 
@@ -89,6 +100,7 @@ declare global {
         phase4: ReturnType<typeof phase4DebugState>;
         phase5: ReturnType<typeof phase5DebugState>;
         phase6: ReturnType<typeof phase6DebugState>;
+        phase7: ReturnType<typeof phase7DebugState>;
         phase2: {
           movement: { speed: number; maxSpeed: number; sprinting: boolean; stamina: number } | null;
           dribbling: { touchQuality: number; looseTouchRisk: number; looseTouch: boolean } | null;
@@ -139,7 +151,7 @@ app.innerHTML = `
       <div class="scoreboard">
         <div class="team home"><span>Real Madrid</span><i class="crest real"></i></div>
         <div class="score-core"><div class="score" data-score>0 - 0</div><div class="clock" data-clock>00:00</div></div>
-        <div class="team away"><i class="crest city"></i><span>Man City</span></div>
+        <div class="team away"><i class="crest city"></i><span data-away-name>Man City</span></div>
       </div>
       <div class="top-left">
         <div class="chip-row">
@@ -169,6 +181,7 @@ app.innerHTML = `
         <button type="button" data-ai-restart>Restart</button>
         <button type="button" data-match-pause>Pause / Resume</button>
         <button type="button" data-squad-open>Squad Hub</button>
+        <button type="button" data-club-open>Club Progress</button>
         <label>Next match <select data-match-length aria-label="Next match length"><option value="240" selected>4 min</option><option value="30">30s demo</option></select></label>
         <details class="rules-options" data-rules-options>
           <summary>Advanced rules</summary>
@@ -220,16 +233,20 @@ app.innerHTML = `
           <h1 class="result-title">Full Time</h1>
           <p class="result-score" data-result-score>Real Madrid 0 - 0 Man City</p>
           <div data-result-stats aria-label="Match statistics"></div>
+          <div class="result-rewards" data-result-rewards aria-live="polite"></div>
+          <button class="restart result-club" data-result-club>Rewards & Club</button>
           <button class="restart" data-restart>Restart Match</button>
         </div>
       </div>
       <div data-squad-ui-host></div>
+      <div data-phase7-ui-host></div>
     </section>
   </main>
 `;
 
 const canvas = document.querySelector<HTMLCanvasElement>(".game-canvas")!;
 const scoreEl = document.querySelector<HTMLElement>("[data-score]")!;
+const awayNameEl = document.querySelector<HTMLElement>("[data-away-name]")!;
 const clockEl = document.querySelector<HTMLElement>("[data-clock]")!;
 const cameraChip = document.querySelector<HTMLElement>("[data-camera-chip]")!;
 const possessionChip = document.querySelector<HTMLElement>("[data-possession-chip]")!;
@@ -258,11 +275,29 @@ const goalMomentEl = document.querySelector<HTMLElement>("[data-goal-moment]")!;
 const motionToggle = document.querySelector<HTMLInputElement>("[data-reduced-motion]")!;
 const squadOpenButton = document.querySelector<HTMLButtonElement>("[data-squad-open]")!;
 const squadUIHost = document.querySelector<HTMLDivElement>("[data-squad-ui-host]")!;
-let reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clubOpenButton = document.querySelector<HTMLButtonElement>("[data-club-open]")!;
+const resultClubButton = document.querySelector<HTMLButtonElement>("[data-result-club]")!;
+const resultRewardsEl = document.querySelector<HTMLDivElement>("[data-result-rewards]")!;
+const phase7UIHost = document.querySelector<HTMLDivElement>("[data-phase7-ui-host]")!;
+const settingsStore = createSettingsStore({
+  defaults: {
+    version: 1,
+    difficulty: "normal",
+    matchLength: 240,
+    weather: "clear",
+    reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    volume: 0.4,
+    rules: { offside: false, advantage: false, injuryTime: false, substitutions: false }
+  }
+});
+const savedSettings = settingsStore.snapshot;
+let reducedMotion = savedSettings.reducedMotion;
 motionToggle.checked = reducedMotion;
+matchLengthSelect.value = String(savedSettings.matchLength);
+difficultySelect.value = savedSettings.difficulty;
 const playerAnimations = new PlayerAnimationSystem();
 const matchAudio = new MatchAudio();
-matchAudio.setVolume(0.4);
+matchAudio.setVolume(savedSettings.volume);
 let soundEnabled = false;
 let soundBusy = false;
 let goalMomentRemaining = 0;
@@ -287,8 +322,10 @@ let attackingTeam: TeamId = "home";
 const matchState = createInitialMatchState(MATCH_DURATION);
 const matchRules = new MatchRuleSystem(matchState);
 const matchFlow = new MatchFlowSystem(matchState);
+matchFlow.setStoppageTimeEnabled(savedSettings.rules.injuryTime);
 const matchStats = new MatchStatsSystem();
 const referee = new RefereeSystem({ bounds: { halfWidth: HALF_W, halfLength: HALF_L }, random: () => rand(0, 1) });
+referee.setOptions(savedSettings.rules);
 let pendingRestart: RestartPlan | null = null;
 let restartPlacement: ReturnType<typeof positionRestart> | null = null;
 let nextKickoffTeam: TeamId = "home";
@@ -296,9 +333,14 @@ const fixedTimestep = new FixedTimestep({ step: 1 / 60, maxSteps: 8 });
 const movementConfig = DEFAULT_MOVEMENT_CONFIG;
 const dribblingSystem = new DribblingSystem({ mode: "impulse", attachmentHeight: BALL_RADIUS });
 const firstTouchSystem = new FirstTouchSystem({ ballHeight: BALL_RADIUS });
-let goalkeeperSystem = new GoalkeeperSystem();
+let goalkeeperSystem = new GoalkeeperSystem({
+  reactionBase: savedSettings.difficulty === "easy" ? 0.57 : savedSettings.difficulty === "hard" ? 0.32 : 0.42,
+  distributionHoldMin: savedSettings.difficulty === "easy" ? 0.65 : savedSettings.difficulty === "hard" ? 0.3 : 0.45,
+  distributionHoldMax: savedSettings.difficulty === "easy" ? 1.65 : savedSettings.difficulty === "hard" ? 0.95 : 1.35
+});
 const footballAI = new FootballAISystem();
-let aiDifficulty: AIDifficultyLevel = "normal";
+let aiDifficulty: AIDifficultyLevel = savedSettings.difficulty;
+footballAI.setDifficulty(aiDifficulty);
 let spectatorMode = false;
 const keeperBrains = new Map<string, KeeperBrainSnapshot>();
 const keeperDistributions = new Map<string, { choice: KeeperDistributionChoice; remaining: number }>();
@@ -325,12 +367,38 @@ const queuedBallActions = new Map<number, {
 const recentBallActionEvents: BallActionEvent[] = [];
 const cameraSystem = new CameraSystem();
 const squadStore = createSquadStore();
+const optionalBrowserStorage = () => {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+};
+const progressionStore = createProgressionStore({ initialCoins: 50 });
+const missionsStore = createPersistentMissions();
+const seasonStore = createSeasonModeStore({ storage: optionalBrowserStorage() });
+reconcileExternalRewards(progressionStore, missionsStore.snapshot, seasonStore.snapshot);
+let activeModeId: "quick-match" | "season" = "quick-match";
+let quickMatchSequence = 0;
+let currentMatchId = "";
+let lastReward: MatchReward | null = null;
+const createQuickMatchId = () => {
+  quickMatchSequence += 1;
+  try {
+    return `quick-${globalThis.crypto.randomUUID()}`;
+  } catch {
+    return `quick-${Date.now()}-${quickMatchSequence}`;
+  }
+};
+const currentHomeCards = () => applyProgressionToCards(homeSquadCards, progressionStore.snapshot);
 let currentHomeTeam: TeamData = {
   ...realMadrid,
-  players: buildMatchTeamData(squadStore.snapshot).map(({ id: _cardId, ...player }) => player)
+  players: buildMatchTeamData(squadStore.snapshot, currentHomeCards()).map(({ id: _cardId, ...player }) => player)
 };
 let squadUI: SquadUI;
+let phase7UI: Phase7UI;
 let squadPausedMatch = false;
+let clubPausedMatch = false;
 
 let lastMovementResult: MovementResult | null = null;
 let lastDribblingResult: DribblingResult | null = null;
@@ -368,7 +436,10 @@ const matchController = new MatchController({
     addMatchEvent(matchState, "camera", `Camera switched to ${nextCameraMode}.`);
     addFeed(`Camera switched to ${nextCameraMode}.`);
   },
-  restart: () => resetMatch(),
+  restart: () => {
+    if (isMatchEnded(matchState)) startCurrentMatch(activeModeId);
+    else resetMatch();
+  },
   pause: () => togglePause()
 });
 
@@ -450,7 +521,7 @@ function rebuildHomeSquad() {
   removePlayerVisuals(homePlayers);
   currentHomeTeam = {
     ...realMadrid,
-    players: buildMatchTeamData(squadStore.snapshot).map(({ id: _cardId, ...player }) => player)
+    players: buildMatchTeamData(squadStore.snapshot, currentHomeCards()).map(({ id: _cardId, ...player }) => player)
   };
   homePlayers = currentHomeTeam.players.map((spec) => createPlayer(currentHomeTeam, spec));
   players = [...homePlayers, ...awayPlayers];
@@ -1602,10 +1673,185 @@ function updateMinimap() {
   minimapController.update(eligiblePlayers(), ball, activePlayer);
 }
 
+function outcomeForPlayer(): MatchOutcome {
+  if (matchState.score.home > matchState.score.away) return "win";
+  if (matchState.score.home < matchState.score.away) return "loss";
+  return "draw";
+}
+
+function currentSeasonFixture(): SeasonFixture | null {
+  return seasonStore.getCurrentFixture();
+}
+
+function progressionCardId(): string | undefined {
+  const squad = squadStore.snapshot;
+  return squad.captainId ?? Object.values(squad.starters)[0];
+}
+
+function latestReward(): MatchReward | null {
+  if (lastReward) return lastReward;
+  const state = progressionStore.snapshot;
+  const id = state.settledMatchIds[state.settledMatchIds.length - 1];
+  return id ? state.settledMatches[id]?.reward ?? null : null;
+}
+
+function phase7ViewModel(): Phase7ViewModel {
+  const progression = progressionStore.snapshot;
+  const cards = currentHomeCards();
+  const squad = squadStore.snapshot;
+  const starterIds = new Set(Object.values(squad.starters));
+  const upgrades = cards.filter((card) => starterIds.has(card.id)).map((card) => {
+    const quote = progressionStore.quoteUpgrade(card.id, {}, card);
+    const attributes = Object.fromEntries(Object.entries(card.attributes).map(([key, value]) => [
+      key,
+      { current: value, next: Math.min(100, value + quote.boosts[key as keyof typeof quote.boosts]) }
+    ]));
+    const previewCard = {
+      ...card,
+      attributes: Object.fromEntries(Object.entries(attributes).map(([key, values]) => [key, values.next])) as typeof card.attributes
+    };
+    return {
+      cardId: card.id,
+      cardName: card.name,
+      currentOverall: calculateCardOverall(card, card.primaryRole),
+      nextOverall: calculateCardOverall(previewCard, previewCard.primaryRole),
+      cost: quote.cost,
+      canAfford: progression.coins >= quote.cost,
+      attributes
+    };
+  });
+  const season = seasonStore.snapshot;
+  const fixture = currentSeasonFixture();
+  const missions = missionsStore.listCurrent()
+    .filter((mission) => mission.scope !== "match" || mission.matchId === currentMatchId)
+    .map((mission) => ({
+      missionId: mission.instanceId,
+      title: mission.title,
+      description: mission.description,
+      progress: mission.progress,
+      target: mission.target,
+      completed: mission.completed,
+      claimed: mission.claimed,
+      claimable: mission.completed && !mission.claimed,
+      reward: mission.reward
+    }));
+  const reward = latestReward();
+  return {
+    coins: progression.coins,
+    xp: progression.totalXp,
+    level: 1 + Math.floor(progression.totalXp / 500),
+    teamOverall: teamOverall(squad, cards),
+    lastReward: reward ? {
+      rewardId: reward.matchId,
+      coins: reward.coins,
+      xp: reward.xp,
+      label: `${reward.outcome === "win" ? "Win" : reward.outcome === "draw" ? "Draw" : "Match"} reward`
+    } : null,
+    upgrades,
+    missions,
+    season: {
+      modeId: season.modeId,
+      status: season.status,
+      currentMatchId: fixture?.matchId ?? null,
+      fixtureLabel: fixture ? `${fixture.homeTeamName} vs ${fixture.awayTeamName}` : "Season complete",
+      played: Object.keys(season.results).length,
+      total: season.fixtures.length,
+      placement: season.completion?.placement ?? null,
+      champion: season.completion?.champion ?? false,
+      rewardEligible: season.completion?.rewardEligible ?? false
+    }
+  };
+}
+
+function startCurrentMatch(modeId: "quick-match" | "season") {
+  activeModeId = modeId;
+  if (modeId === "season") {
+    const fixture = currentSeasonFixture();
+    if (!fixture) {
+      phase7UI.open();
+      return;
+    }
+    currentMatchId = fixture.matchId;
+    awayNameEl.textContent = fixture.playerIsHome ? fixture.awayTeamName : fixture.homeTeamName;
+  } else {
+    currentMatchId = createQuickMatchId();
+    awayNameEl.textContent = "Man City";
+  }
+  missionsStore.startMatch(currentMatchId, Date.now());
+  phase7UI.close();
+  clubPausedMatch = false;
+  rebuildHomeSquad();
+}
+
+function openClubProgress() {
+  clubPausedMatch = matchFlow.pause();
+  matchAudio.setActive(false);
+  phase7UI.render();
+  phase7UI.open();
+}
+
+function settleCompletedMatch() {
+  const stats = matchStats.snapshot;
+  const outcome = outcomeForPlayer();
+  const settlement = progressionStore.settleMatch({
+    matchId: currentMatchId,
+    modeId: activeModeId,
+    outcome,
+    performance: {
+      goals: matchState.score.home,
+      shots: stats.home.shots,
+      completedPasses: stats.home.completedPasses,
+      tackles: stats.home.tackles,
+      possessionPercent: stats.home.possessionPercent
+    }
+  }, { cardId: progressionCardId() });
+  lastReward = settlement.reward;
+  const missionResult = missionsStore.processMatch({
+    type: "matchCompleted",
+    matchId: currentMatchId,
+    occurredAt: Date.now(),
+    outcome,
+    modeId: activeModeId,
+    goals: matchState.score.home,
+    shots: stats.home.shots,
+    completedPasses: stats.home.completedPasses,
+    tackles: stats.home.tackles
+  });
+
+  if (activeModeId === "season") {
+    const fixture = seasonStore.snapshot.fixtures.find((item) => item.matchId === currentMatchId);
+    if (fixture) {
+      const homeScore = fixture.playerIsHome ? matchState.score.home : matchState.score.away;
+      const awayScore = fixture.playerIsHome ? matchState.score.away : matchState.score.home;
+      const receipt = seasonStore.recordResult(currentMatchId, homeScore, awayScore);
+      if (receipt.completed) {
+        const claim = seasonStore.claimCompletionReward();
+        if (claim.claimed && claim.reward) {
+          progressionStore.creditExternalReward({
+            transactionId: claim.reward.rewardId,
+            coins: claim.reward.coins,
+            xp: claim.reward.xp,
+            source: "season"
+          });
+        }
+      }
+    }
+  }
+
+  const bonusLabel = settlement.reward.performanceBonus > 0
+    ? ` · performance +${settlement.reward.performanceBonusCoins} coins / +${settlement.reward.performanceBonusXp} XP`
+    : "";
+  resultRewardsEl.innerHTML = `<strong>+${settlement.reward.coins} coins · +${settlement.reward.xp} XP</strong><span>${outcome.toUpperCase()} reward${bonusLabel}</span>`;
+  const completed = missionResult.newlyCompletedMissionIds.length;
+  if (completed > 0) addFeed(`${completed} mission${completed === 1 ? "" : "s"} ready to claim.`);
+  phase7UI?.render();
+}
+
 function endMatch() {
   matchAudio.play("fulltime");
   addMatchEvent(matchState, "fullTime", "Full time.");
-  resultScoreEl.textContent = `Real Madrid ${scoreText(matchState)} Man City`;
+  settleCompletedMatch();
+  resultScoreEl.textContent = `Real Madrid ${scoreText(matchState)} ${awayNameEl.textContent ?? "Opponent"}`;
   const stats = matchStats.snapshot;
   const rows = [
     ["Shots", stats.home.shots, stats.away.shots],
@@ -1707,12 +1953,33 @@ function phase6DebugState() {
     revision: squadStore.revision,
     formation: squad.formationId,
     starters: Object.values(squad.starters),
-    overall: teamOverall(squad),
+    overall: teamOverall(squad, currentHomeCards()),
     chemistry: chemistry(squad),
     validation: validateSquad(squad),
     tactics: homeRuntimeTactics(),
     setPieces: { ...squad.setPieces },
     ui: squadUI?.debugSnapshot() ?? null
+  };
+}
+
+function phase7DebugState() {
+  const progression = progressionStore.snapshot;
+  return {
+    modeId: activeModeId,
+    matchId: currentMatchId,
+    coins: progression.coins,
+    xp: progression.totalXp,
+    settledMatches: progression.settledMatchIds.length,
+    creditedRewards: progression.creditedRewardIds.length,
+    missions: missionsStore.listCurrent().map((mission) => ({
+      id: mission.instanceId,
+      scope: mission.scope,
+      progress: mission.progress,
+      target: mission.target,
+      claimed: mission.claimed
+    })),
+    season: seasonStore.snapshot,
+    ui: phase7UI?.debugSnapshot() ?? null
   };
 }
 
@@ -1833,6 +2100,7 @@ function updateRenderDebug() {
     phase4: phase4DebugState(),
     phase5: phase5DebugState(),
     phase6: phase6DebugState(),
+    phase7: phase7DebugState(),
     stateHash: stateHash({ elapsed: matchState.elapsed, score: matchState.score, owner: matchState.ballOwnerId, active: matchState.activePlayerId, ball: ball.position.toArray(), velocity: ball.velocity.toArray() })
   });
   if (aiDebugToggle.checked && (lastFrameCaptureAt === 0 || now - lastFrameCaptureAt > 2000)) {
@@ -1850,6 +2118,13 @@ function separatePlayers() {
 }
 
 function setupInput() {
+  const weatherSelect = aiSettings.querySelector<HTMLSelectElement>("[data-weather]")!;
+  const volumeInput = aiSettings.querySelector<HTMLInputElement>("[data-volume]")!;
+  weatherSelect.value = savedSettings.weather;
+  volumeInput.value = String(Math.round(savedSettings.volume * 100));
+  aiSettings.querySelectorAll<HTMLInputElement>("[data-rule]").forEach((input) => {
+    input.checked = savedSettings.rules[input.dataset.rule as keyof typeof savedSettings.rules];
+  });
   canvas.focus();
   keyboardInput.attach();
   // Settings use native keyboard semantics. Detach gameplay listeners and
@@ -1867,6 +2142,7 @@ function setupInput() {
   });
   difficultySelect.addEventListener("change", () => {
     aiDifficulty = difficultySelect.value as AIDifficultyLevel;
+    settingsStore.update({ difficulty: aiDifficulty });
     footballAI.setDifficulty(aiDifficulty);
     goalkeeperSystem = new GoalkeeperSystem({
       reactionBase: aiDifficulty === "easy" ? 0.57 : aiDifficulty === "hard" ? 0.32 : 0.42,
@@ -1883,7 +2159,13 @@ function setupInput() {
     activePlayer.marker.material.opacity = spectatorMode ? 0 : 0.92;
     addFeed(spectatorMode ? "Watching AI vs AI. Restart for a fresh comparison." : "Player control restored.");
   });
-  aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => resetMatch());
+  aiSettings.querySelector<HTMLButtonElement>("[data-ai-restart]")!.addEventListener("click", () => {
+    if (isMatchEnded(matchState)) startCurrentMatch(activeModeId);
+    else resetMatch();
+  });
+  matchLengthSelect.addEventListener("change", () => {
+    settingsStore.update({ matchLength: Number(matchLengthSelect.value) === 30 ? 30 : 240 });
+  });
   aiSettings.querySelector<HTMLButtonElement>("[data-match-pause]")!.addEventListener("click", () => {
     togglePause();
   });
@@ -1892,13 +2174,18 @@ function setupInput() {
     matchAudio.setActive(false);
     squadUI.open();
   });
+  clubOpenButton.addEventListener("click", openClubProgress);
+  resultClubButton.addEventListener("click", openClubProgress);
   aiSettings.querySelectorAll<HTMLInputElement>("[data-rule]").forEach((input) => input.addEventListener("change", () => {
     referee.setOptions({ [input.dataset.rule!]: input.checked });
+    settingsStore.update({ rules: { [input.dataset.rule!]: input.checked } });
     matchFlow.setStoppageTimeEnabled(referee.options.injuryTime);
   }));
   aiSettings.querySelectorAll("details").forEach((details) => details.addEventListener("toggle", updateAIDebugPanel));
-  aiSettings.querySelector<HTMLSelectElement>("[data-weather]")!.addEventListener("change", (event) => {
-    stadium.setWeather((event.target as HTMLSelectElement).value as "clear" | "rain");
+  weatherSelect.addEventListener("change", (event) => {
+    const weather = (event.target as HTMLSelectElement).value as "clear" | "rain";
+    stadium.setWeather(weather);
+    settingsStore.update({ weather });
   });
   motionToggle.addEventListener("change", () => {
     reducedMotion = motionToggle.checked;
@@ -1906,6 +2193,7 @@ function setupInput() {
     cameraSystem.clearGoalEmphasis();
     stadium.setReducedMotion(reducedMotion);
     document.querySelector(".game-root")!.classList.toggle("reduced-motion", reducedMotion);
+    settingsStore.update({ reducedMotion });
   });
   soundEnableButton.addEventListener("click", async () => {
     if (soundBusy) return;
@@ -1922,8 +2210,10 @@ function setupInput() {
     audioStatusEl.textContent = soundEnabled ? "Sound on · pauses with the match." : matchAudio.debugSnapshot().error ?? "Sound off · enable to retry or unmute.";
     if (soundEnabled) matchAudio.play("ui");
   });
-  aiSettings.querySelector<HTMLInputElement>("[data-volume]")!.addEventListener("input", (event) => {
-    matchAudio.setVolume(Number((event.target as HTMLInputElement).value) / 100);
+  volumeInput.addEventListener("input", (event) => {
+    const volume = Number((event.target as HTMLInputElement).value) / 100;
+    matchAudio.setVolume(volume);
+    settingsStore.update({ volume });
   });
   aiSettings.querySelector<HTMLButtonElement>("[data-sound-test]")!.addEventListener("click", () => {
     const cue = aiSettings.querySelector<HTMLSelectElement>("[data-sound-cue]")!.value as MatchAudioCue;
@@ -1952,7 +2242,7 @@ function setupInput() {
   });
   touchInput = new TouchInput(stickEl, document.querySelectorAll<HTMLElement>("[data-action]"));
   touchInput.attach();
-  restartButton.addEventListener("click", () => resetMatch());
+  restartButton.addEventListener("click", () => startCurrentMatch(activeModeId));
 }
 
 function sampleCanvas() {
@@ -1990,7 +2280,10 @@ window.addEventListener("resize", onResize);
 
 const stadium = addWorldPitch(scene);
 stadium.setReducedMotion(reducedMotion);
+stadium.setWeather(savedSettings.weather);
 document.querySelector(".game-root")!.classList.toggle("reduced-motion", reducedMotion);
+currentMatchId = createQuickMatchId();
+missionsStore.startMatch(currentMatchId, Date.now());
 setupPlayers();
 scene.add(ball.mesh);
 squadUI = new SquadUI({
@@ -1998,12 +2291,67 @@ squadUI = new SquadUI({
   store: squadStore,
   onPlay: () => {
     squadPausedMatch = false;
-    rebuildHomeSquad();
+    if (isMatchEnded(matchState)) startCurrentMatch(activeModeId);
+    else rebuildHomeSquad();
   },
   onClose: (reason) => {
     if (reason === "close" && squadPausedMatch) matchFlow.resume();
     squadPausedMatch = false;
     matchAudio.setActive(!document.hidden && matchState.status !== "paused");
+  }
+});
+phase7UI = new Phase7UI({
+  root: phase7UIHost,
+  getViewModel: phase7ViewModel,
+  onClose: () => {
+    if (clubPausedMatch) matchFlow.resume();
+    clubPausedMatch = false;
+    matchAudio.setActive(!document.hidden && matchState.status !== "paused");
+  },
+  onQuickMatch: () => startCurrentMatch("quick-match"),
+  onSeasonStart: (modeId) => {
+    if (seasonStore.snapshot.status === "completed") {
+      reconcileExternalRewards(progressionStore, missionsStore.snapshot, seasonStore.snapshot);
+      const diagnosticsBefore = progressionStore.diagnostics.length;
+      progressionStore.persist();
+      const flushFailed = progressionStore.diagnostics.slice(diagnosticsBefore)
+        .some((diagnostic) => diagnostic.code === "write-failed" || diagnostic.code === "quota");
+      if (flushFailed) {
+        addFeed("Progression save is unavailable. The completed Season was kept so its reward can recover safely.");
+        phase7UI.render();
+        return;
+      }
+      seasonStore.startNewSeason(modeId);
+    } else {
+      seasonStore.startSeason(modeId);
+    }
+    startCurrentMatch("season");
+  },
+  onSeasonContinue: () => startCurrentMatch("season"),
+  onUpgradeConfirm: (cardId) => {
+    const card = homeSquadCards.find((candidate) => candidate.id === cardId);
+    if (!card) return;
+    const quote = progressionStore.quoteUpgrade(cardId, {}, card);
+    const result = progressionStore.upgradeCard(cardId, {
+      confirmed: true,
+      confirmationToken: quote.confirmationToken,
+      expectedCost: quote.cost
+    }, {}, card);
+    if (result.applied) addFeed(`${card.short} upgraded. New squad strength applies next match.`);
+    phase7UI.render();
+  },
+  onMissionClaim: (missionId) => {
+    const claim = missionsStore.claim(missionId, { claimedAt: Date.now() });
+    if (claim.claimed && claim.transactionId) {
+      progressionStore.creditExternalReward({
+        transactionId: claim.transactionId,
+        coins: claim.coins,
+        xp: claim.xp,
+        source: "mission"
+      });
+      addFeed(`Mission claimed: +${claim.coins} coins / +${claim.xp} XP.`);
+    }
+    phase7UI.render();
   }
 });
 setupInput();
@@ -2019,7 +2367,8 @@ window.__eliteKickoffDebug = {
     phase3: phase3DebugState(),
     phase4: phase4DebugState(),
     phase5: phase5DebugState(),
-    phase6: phase6DebugState()
+    phase6: phase6DebugState(),
+    phase7: phase7DebugState()
   })
 };
 resetMatch();

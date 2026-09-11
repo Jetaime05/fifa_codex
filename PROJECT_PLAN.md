@@ -1854,9 +1854,15 @@ Acceptance verification:
 - `npm.cmd run build`: passes TypeScript and Vite; the main chunk is **728.77 kB minified / 200.39 kB gzip** and still exceeds Vite's advisory threshold.
 - Cross-system acceptance covers pause mid-windup, ownership turnover, restart/squad clearing, single physical release, contact reach/height, reset semantics, physical dribble/first touch, moving receiver behavior, successful/failed duels, aerial actions and swept keeper contact.
 - Browser QA covered desktop rendering; pause clock hold; Squad Hub Play reset of score/time and kickoff; Broadcast/Follow camera switching; 390×844 touch controls (all eight buttons and joystick within the viewport, Lob triggering pass wind-up); reduced-motion toggle/class behavior; and approximately two minutes of sustained smoke. No console warnings or errors were observed. No screenshots or clips were saved.
-- Independent re-review found no acceptance blocker. Phase 6.5 is accepted; Phase 7 may now start but remains unstarted.
+- Independent re-review found no acceptance blocker. Phase 6.5 is accepted; Phase 7 was subsequently accepted on 2026-09-11.
 
-### Phase 7 - Progression And Modes
+### Phase 7 - Progression And Modes (Accepted)
+
+Status: Accepted on 2026-09-11. The offline reward, card upgrade, mission,
+six-fixture Season, local save and responsive progression-hub flows are
+implemented and integrated with completed match results. See
+[`artifacts/phase7/QA.md`](./artifacts/phase7/QA.md) for exact evidence and
+limitations.
 
 Goal:
 
@@ -1945,9 +1951,9 @@ Phase Gate:
 
 Demo Evidence:
 
-- Clip of reward screen.
-- Clip of card upgrade.
-- Screenshot of saved progression after reload.
+- Reward screen, mission claim and card upgrade were inspected live in the browser; no clip was saved.
+- Season start/continue and persistence across a fresh tab were inspected live; no screenshot was saved.
+- The integrated save/reload loop is covered by deterministic acceptance tests.
 
 Out of Scope:
 
